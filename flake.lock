@@ -1,0 +1,49 @@
+{
+  "nodes": {
+    "faun": {
+      "inputs": {
+        "nixpkgs": [
+          "nixpkgs"
+        ]
+      },
+      "locked": {
+        "lastModified": 1794130098,
+        "narHash": "sha256-uI7erlDS4yOEQwgl7elCMEw8oIS44DzpHmgS4K4KQbI=",
+        "ref": "assemulator-fixes",
+        "rev": "78faea045392d92a4b736177414a3e0b8cc73410",
+        "revCount": 540,
+        "type": "git",
+        "url": "file:///vault/repos/faun-lang"
+      },
+      "original": {
+        "ref": "assemulator-fixes",
+        "type": "git",
+        "url": "file:///vault/repos/faun-lang"
+      }
+    },
+    "nixpkgs": {
+      "locked": {
+        "lastModified": 1793865203,
+        "narHash": "sha256-/cpdPHaySDIyCgZI6EWngiM6jK3YLUNzv1b7lTzy6Bk=",
+        "owner": "nixos",
+        "repo": "nixpkgs",
+        "rev": "c56a87d8e41ce69bd2af57eb35dcc117a9dfca33",
+        "type": "github"
+      },
+      "original": {
+        "owner": "nixos",
+        "ref": "nixos-26.05",
+        "repo": "nixpkgs",
+        "type": "github"
+      }
+    },
+    "root": {
+      "inputs": {
+        "faun": "faun",
+        "nixpkgs": "nixpkgs"
+      }
+    }
+  },
+  "root": "root",
+  "version": 7
+}

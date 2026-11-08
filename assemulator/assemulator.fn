@@ -1,0 +1,13 @@
+# Assemulator: an assembler and emulator for any toy processor that tells
+# it how to encode an instruction (`InstructionSet`) and how to step
+# (`Processor`). A processor's program is a few small functions and
+#
+#   main!(host) -> assemulator!(host, MyIsa)
+
+package {}
+
+import assembler {Argument.*, Assembly, Sources, InstructionSet, assemble, field}
+import ports {Ports, PortRead, Step.*, Processor, ports_new, port_read, port_write}
+import run {assemulator!, load!, hex}
+
+export {Argument.*, Assembly, Sources, InstructionSet, assemble, field, Ports, PortRead, Step.*, Processor, ports_new, port_read, port_write, assemulator!, load!, hex}

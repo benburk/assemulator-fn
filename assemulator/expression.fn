@@ -1,0 +1,126 @@
+# Evaluates an expression's tokens on 64-bit words, which wrap. Operators,
+# loosest first: `||`, `&&`, comparisons, `|`, `^`, `&`, shifts, `+ -`,
+# `* / %`; prefix `-`, `~` and `!`. A comparison answers 1 or 0.
+
+import lexer {Token.*, tokenize}
+import symbols {Symbols, symbols_lookup, symbols_new}
+
+export {evaluate}
+
+evaluate : (Symbols, List(Token)) -> Result(U64, Str)
+evaluate(_, []) -> Err("expected an expression")
+evaluate(symbols, tokens) -> (
+  (value, at) = binary(symbols, tokens, 0, 0)?
+  if at < tokens.len() return Err("unexpected `${tokens.get_or(at, Op("?"))}`")
+  Ok(value)
+)
+
+precedence : Str -> Nat
+precedence("||") -> 1
+precedence("&&") -> 2
+precedence("==") -> 3
+precedence("!=") -> 3
+precedence("<") -> 3
+precedence("<=") -> 3
+precedence(">") -> 3
+precedence(">=") -> 3
+precedence("|") -> 4
+precedence("^") -> 5
+precedence("&") -> 6
+precedence("<<") -> 7
+precedence(">>") -> 7
+precedence("+") -> 8
+precedence("-") -> 8
+precedence("*") -> 9
+precedence("/") -> 9
+precedence("%") -> 9
+precedence(_) -> 0
+
+# The operator at `at` that binds at least as tightly as `least`, if any.
+operator_at : (List(Token), Nat, Nat) -> Result((Str, Nat), [None])
+operator_at(tokens, at, least) -> tokens.get(at) is (
+  Ok(Op(op)) if precedence(op) > 0 & precedence(op) >= least then Ok((op, precedence(op)))
+  _ then Err(None)
+)
+
+binary : (Symbols, List(Token), Nat, Nat) -> Result((U64, Nat), Str)
+binary(symbols, tokens, at, least) -> (
+  (left, at) = unary(symbols, tokens, at)?
+  while operator_at(tokens, at, least) is Ok((op, level)) do (
+    (right, next) = binary(symbols, tokens, at + 1, level + 1)?
+    left = apply(op, left, right)?
+    at = next
+  )
+  Ok((left, at))
+)
+
+flag : Bool -> U64
+flag(True) -> U64.of_nat(1)
+flag(False) -> U64.zero
+
+truthy : U64 -> Bool
+truthy(x) -> x != U64.zero
+
+apply : (Str, U64, U64) -> Result(U64, Str)
+apply("+", a, b) -> Ok(a + b)
+apply("-", a, b) -> Ok(a - b)
+apply("*", a, b) -> Ok(a * b)
+apply("/", _, b) if b == U64.zero -> Err("division by zero")
+apply("/", a, b) -> Ok(a / b)
+apply("%", _, b) if b == U64.zero -> Err("division by zero")
+apply("%", a, b) -> Ok(a % b)
+apply("&", a, b) -> Ok(a.and(b))
+apply("|", a, b) -> Ok(a.or(b))
+apply("^", a, b) -> Ok(a.xor(b))
+apply("<<", a, b) -> Ok(a.shift_left((b % U64.of_nat(64)).to_nat()))
+apply(">>", a, b) -> Ok(a.shift_right((b % U64.of_nat(64)).to_nat()))
+apply("<", a, b) -> Ok(flag(a < b))
+apply(">", a, b) -> Ok(flag(a > b))
+apply("<=", a, b) -> Ok(flag(a <= b))
+apply(">=", a, b) -> Ok(flag(a >= b))
+apply("==", a, b) -> Ok(flag(a == b))
+apply("!=", a, b) -> Ok(flag(a != b))
+apply("&&", a, b) -> Ok(flag(truthy(a) & truthy(b)))
+apply("||", a, b) -> Ok(flag(truthy(a) | truthy(b)))
+apply(op, _, _) -> Err("unknown operator `${op}`")
+
+unary : (Symbols, List(Token), Nat) -> Result((U64, Nat), Str)
+unary(symbols, tokens, at) -> tokens.get(at) is (
+  Ok(Number(n)) then Ok((n, at + 1))
+  Ok(Word(name)) then (
+    value = symbols_lookup(symbols, name)?
+    Ok((value, at + 1))
+  )
+  Ok(Op("(")) then (
+    (value, close) = binary(symbols, tokens, at + 1, 0)?
+    tokens.get(close) is Ok(Op(")")) else return Err("expected `)`")
+    Ok((value, close + 1))
+  )
+  Ok(Op("-")) then (
+    (value, next) = unary(symbols, tokens, at + 1)?
+    Ok((U64.zero - value, next))
+  )
+  Ok(Op("~")) then (
+    (value, next) = unary(symbols, tokens, at + 1)?
+    Ok((value.not(), next))
+  )
+  Ok(Op("!")) then (
+    (value, next) = unary(symbols, tokens, at + 1)?
+    Ok((flag(value == U64.zero), next))
+  )
+  Ok(Op("+")) then unary(symbols, tokens, at + 1)
+  Ok(token) then Err("expected a value, found `${token}`")
+  Err(_) then Err("unexpected end of expression")
+)
+
+calc : Str -> Result(U64, Str)
+calc(text) -> evaluate(symbols_new, tokenize(text.to_utf8())?)
+
+expect calc("1+2*3") == Ok(U64.of_nat(7))
+expect calc("(1+2)*3") == Ok(U64.of_nat(9))
+expect calc("10-4-3") == Ok(U64.of_nat(3))
+expect calc("1<2 && 2!=3") == Ok(U64.of_nat(1))
+expect calc("-1") == Ok(U64.zero.not())
+expect calc("(0x1234 >> 6) & 1023") == Ok(U64.of_nat(72))
+expect calc("1/0").is_err() & calc("(1").is_err() & calc("1)").is_err()
+expect calc("nope").is_err()

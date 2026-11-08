@@ -1,0 +1,99 @@
+# Labels and what they stand for.
+#
+# A global label is seen everywhere. A local label, whose name begins with
+# `.`, belongs to the run of lines between two global labels: a reference
+# looks for it there, then in the run before. Labels declared in a file
+# included under a namespace, `string: .include "string.asm"`, are named
+# `string::label`; inside that file, a name is looked for in its namespace
+# first, then as it is written.
+#
+# The assembler makes two passes. The first learns every label, a name not
+# yet declared standing for 0; the second assembles with all of them known,
+# and refuses a label that landed somewhere else the second time.
+
+import lexer {is_local}
+
+export {Symbol.*, Symbols, symbols_new, symbols_pass, symbols_lookup, symbols_declare, symbols_qualify, symbols_enter, symbols_leave}
+
+Symbol : [Address(U64), Data(U64), Value(U64)].(
+  value : Symbol -> U64
+  value(Address(x)) -> x
+  value(Data(x)) -> x
+  value(Value(x)) -> x
+
+  equals : (Symbol, Symbol) -> Bool
+)
+
+Symbols = {
+  # What this pass has declared.
+  table: Map(Str, Symbol),
+  # Everything the first pass declared; empty during it.
+  known: Map(Str, Symbol),
+  # The namespace of the file being assembled, `` at the top.
+  prefix: Str,
+  # How many global labels this pass has passed.
+  run: Nat,
+  final: Bool,
+}
+
+symbols_new : Symbols
+symbols_new = {table: Map.empty, known: Map.empty, prefix: "", run: 0, final: False}
+
+# Begin the second pass, remembering what the first learned.
+symbols_pass : Symbols -> Symbols
+symbols_pass(symbols) -> {table: Map.empty, known: symbols.table, prefix: "", run: 0, final: True}
+
+symbols_qualify : (Symbols, Str) -> Str
+symbols_qualify(symbols, name) -> if symbols.prefix.is_empty() then name else "${symbols.prefix}::${name}"
+
+# Enter a file included under `namespace`, answering the prefix to restore.
+symbols_enter : (Symbols, Str) -> (Symbols, Str)
+symbols_enter(symbols, namespace) -> ({prefix: symbols_qualify(symbols, namespace), *symbols}, symbols.prefix)
+
+symbols_leave : (Symbols, Str) -> Symbols
+symbols_leave(symbols, prefix) -> {prefix, *symbols}
+
+local_key : (Str, Nat) -> Str
+local_key(name, run) -> "${name}#${run}"
+
+find : (Symbols, Str) -> Result(Symbol, [Missing])
+find(symbols, key) -> symbols.table.get(key) is (
+  Ok(symbol) then Ok(symbol)
+  Err(_) then symbols.known.get(key)
+)
+
+symbols_lookup : (Symbols, Str) -> Result(U64, Str)
+symbols_lookup(symbols, name) -> (
+  found = if is_local(name) then (
+    key = symbols_qualify(symbols, name)
+    find(symbols, local_key(key, symbols.run)) is (
+      Ok(symbol) then Ok(symbol)
+      Err(_) then if symbols.run == 0 then Err(Missing) else find(symbols, local_key(key, symbols.run - 1))
+    )
+  ) else find(symbols, symbols_qualify(symbols, name)) is (
+    Ok(symbol) then Ok(symbol)
+    Err(_) then find(symbols, name)
+  )
+  found is (
+    Ok(symbol) then Ok(symbol.value())
+    Err(_) then Err("undefined label `${name}`")
+  )
+)
+
+moved : (Symbol, Result(Symbol, [Missing])) -> Bool
+moved(Address(x), Ok(Address(y))) -> x != y
+moved(Data(x), Ok(Data(y))) -> x != y
+moved(_, _) -> False
+
+symbols_declare : (Symbols, Str, Symbol) -> Result(Symbols, Str)
+symbols_declare(symbols, name, symbol) -> (
+  local = is_local(name)
+  qualified = symbols_qualify(symbols, name)
+  key = if local then local_key(qualified, symbols.run) else qualified
+  if symbols.table.contains(key) return Err("label `${name}` is already defined")
+  if symbols.final & moved(symbol, symbols.known.get(key)) return Err("label `${name}` moved between passes: something above it depends on a label defined later")
+  run = if local then symbols.run else symbols.run + 1
+  Ok({table: symbols.table.insert(key, symbol), run, *symbols})
+)
+
+expect symbols_declare(symbols_new, "a", Address(U64.of_nat(4))).map_ok(|s| symbols_lookup(s, "a")) == Ok(Ok(U64.of_nat(4)))

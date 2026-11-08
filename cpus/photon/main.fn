@@ -1,0 +1,275 @@
+# Photon: a 16-bit fixed-length, two-operand, load-store instruction set on
+# 8-bit words, with eight registers `a` to `h`, separate 8-bit address
+# spaces for program and data, and one flag `x`, set by arithmetic, shifts
+# and comparisons. See the README for the encoding.
+
+package {
+  assemulator: "../../assemulator/assemulator"
+}
+
+import std.host {Host}
+import assemulator {Argument.*, Ports, Step.*, field, port_read, port_write, assemulator!}
+
+Isa : [Photon].(
+  register : (Isa, Str) -> Result(Nat, [NotRegister])
+  register(_, name) -> ["a", "b", "c", "d", "e", "f", "g", "h"]
+    .find_index(|r| r == name | r.to_utf8().map(|c| c.to_ascii_upper()) == name.to_utf8())
+    .map_err(|_| NotRegister)
+
+  opcodes : Isa -> List(Str)
+  opcodes(_) -> [
+    "and", "or", "xor", "mov", "tst", "eq", "geq", "ges",
+    "add", "addc", "addx", "addb", "sub", "subc", "subx", "subb",
+    "shl", "shlc", "shlx", "shlb", "shr", "shrc", "shrx", "shrb",
+    "mvt", "mvf", "cad", "csb", "neg", "swap", "psh", "pop",
+    "bt", "bf", "jmp", "jsr", "btd", "ld", "st", "pld", "pst", "ret", "halt",
+  ]
+
+  big_endian : Isa -> Bool
+  big_endian(_) -> True
+
+  encode : (Isa, U64, Str, List(Argument)) -> Result(List(U8), Str)
+  encode(_, _, op, args) -> encoded(op, args).map_ok(|word| [U8.of_nat(word / 256), U8.of_nat(word % 256)])
+
+  boot : (Isa, U64, List(U8), List(U8)) -> Cpu
+  boot(_, start, program, data) -> Cpu({
+    pc: start.to_nat() / 2 % 256,
+    regs: List.repeat(0, 8),
+    x: False,
+    program: program.blocks(2).complete.map(|pair| pair.get_or(0, U8.zero).to_nat() * 256 + pair.get_or(1, U8.zero).to_nat()),
+    data: data.map(|byte| byte.to_nat()),
+  })
+)
+
+# Register `a` in its field, and register `b` in its.
+to_a : Nat -> Nat
+to_a(r) -> r * 8192
+
+to_b : Nat -> Nat
+to_b(r) -> r * 32
+
+two_registers : List(Str)
+two_registers = [
+  "and", "or", "xor", "mov", "tst", "eq", "geq", "ges",
+  "add", "addc", "addx", "addb", "sub", "subc", "subx", "subb",
+  "shl", "shlc", "shlx", "shlb", "shr", "shrc", "shrx", "shrb",
+  "mvt", "mvf", "cad", "csb", "neg", "swap", "psh", "pop",
+]
+
+# The ALU operations that take an immediate, and the shifts, negation and
+# swap, which may name one register for both operands.
+immediates : List(Str)
+immediates = ["and", "or", "xor", "mov", "tst", "eq", "geq", "ges"]
+
+one_register : List(Str)
+one_register = ["shl", "shlc", "shlx", "shlb", "shr", "shrc", "shrx", "shrb", "neg", "swap"]
+
+# Branches on the flag, and branches on a register.
+flag_branches : List(Str)
+flag_branches = ["bt", "bf", "jmp"]
+
+register_branches : List(Str)
+register_branches = ["jsr", "bt", "bf", "jmp", "btd"]
+
+code : (List(Str), Str) -> Result(Nat, [NotFound])
+code(names, op) -> names.find_index(|name| name == op)
+
+# A branch target, a byte address, as the word address it holds.
+target : U64 -> Result(Nat, Str)
+target(address) -> field(address / U64.of_nat(2), 8)
+
+encoded : (Str, List(Argument)) -> Result(Nat, Str)
+encoded(op, [Reg(a), Reg(b)]) if code(two_registers, op) is Ok(k) -> Ok(to_a(a) + to_b(b) + k)
+encoded(op, [Reg(a), Imm(x)]) if code(immediates, op) is Ok(k) -> field(x, 8).map_ok(|v| to_a(a) + 2048 + k * 256 + v)
+encoded(op, [Imm(x)]) if code(flag_branches, op) is Ok(k) -> target(x).map_ok(|v| 4096 + k * 256 + v)
+encoded(op, [Reg(a), Imm(x)]) if code(register_branches, op) is Ok(k) -> target(x).map_ok(|v| to_a(a) + 4864 + k * 256 + v)
+encoded("ld", [Reg(a), Mem(x)]) -> field(x, 8).map_ok(|v| to_a(a) + 6144 + v)
+encoded("st", [Reg(a), Mem(x)]) -> field(x, 8).map_ok(|v| to_a(a) + 6400 + v)
+encoded("pld", [Reg(a), Imm(x)]) -> field(x, 8).map_ok(|v| to_a(a) + 6656 + v)
+encoded("pst", [Reg(a), Imm(x)]) -> field(x, 8).map_ok(|v| to_a(a) + 6912 + v)
+encoded("ld", [Reg(a), MemReg(b, x)]) -> field(x, 5).map_ok(|v| to_a(a) + 7168 + to_b(b) + v)
+encoded("st", [Reg(a), MemReg(b, x)]) -> field(x, 5).map_ok(|v| to_a(a) + 7424 + to_b(b) + v)
+encoded("add", [Reg(a), Reg(b), Imm(x)]) -> field(x, 5).map_ok(|v| to_a(a) + 7680 + to_b(b) + v)
+encoded("jsr", [Imm(x)]) -> target(x).map_ok(|v| 62208 + v)
+encoded("ret", []) -> Ok(62976)
+encoded("halt", []) -> Ok(7936)
+# pseudo-ops
+encoded("add", [Reg(a), Imm(x)]) -> field(x, 5).map_ok(|v| to_a(a) + 7680 + to_b(a) + v)
+encoded(op, [Reg(a)]) if code(two_registers, op) is Ok(k) & one_register.contains(op) -> Ok(to_a(a) + to_b(a) + k)
+encoded(op, args) -> Err("invalid instruction: ${op} ${args.map(|arg| arg.to_str()).join(", ")}")
+
+State = {pc: Nat, regs: List(Nat), x: Bool, program: List(Nat), data: List(Nat)}
+
+Cpu : State.(
+  step : (Cpu, Ports) -> (Cpu, Ports, Step)
+  step(Cpu(cpu), ports) -> (
+    if cpu.pc >= cpu.program.len() return (Cpu(cpu), ports, Halt)
+    inst = cpu.program.get_or(cpu.pc, 0)
+    next = {pc: (cpu.pc + 1) % 256, *cpu}
+    (after, ports, step) = execute(next, ports, inst)
+    if step is Continue then (Cpu(after), ports, step) else (Cpu(cpu), ports, step)
+  )
+
+  show : Cpu -> Str
+  show(Cpu(cpu)) -> "pc: ${cpu.pc} regs: ${cpu.regs} x: ${cpu.x} data: ${cpu.data}"
+)
+
+byte : Nat -> Nat
+byte(n) -> n % 256
+
+bit : Bool -> Nat
+bit(True) -> 1
+bit(False) -> 0
+
+reg : (State, Nat) -> Nat
+reg(cpu, r) -> cpu.regs.get_or(r, 0)
+
+set : (State, Nat, Nat) -> State
+set(cpu, r, value) -> {regs: cpu.regs.put(r, byte(value)), *cpu}
+
+flag : (State, Bool) -> State
+flag(cpu, x) -> {x, *cpu}
+
+# Two's complement bytes compared as signed numbers.
+signed_ge : (Nat, Nat) -> Bool
+signed_ge(a, b) -> (a + 128) % 256 >= (b + 128) % 256
+
+load : (State, Nat) -> Result(Nat, Str)
+load(cpu, address) -> cpu.data.get(byte(address)).map_err(|_| "invalid data address ${byte(address)}")
+
+store : (State, Nat, Nat) -> Result(State, Str)
+store(cpu, address, value) -> (
+  data = cpu.data.set(byte(address), value).map_err(|_| "invalid data address ${byte(address)}")?
+  Ok({data, *cpu})
+)
+
+execute : (State, Ports, Nat) -> (State, Ports, Step)
+execute(cpu, ports, inst) -> (
+  ra = inst / 8192 % 8
+  rb = inst / 32 % 8
+  group = inst / 256 % 32
+  # five bits sign-extended for the offset forms, else the low byte
+  low = inst % 32
+  imm = if inst.and(7168) == 7168 then (if low >= 16 then low + 224 else low) else inst % 256
+  result = if group == 0 then alu(cpu, inst % 32, ra, rb)
+    else if inst / 2048 % 4 == 1 then Ok(immediate(cpu, group % 8, ra, imm))
+    else Ok(cpu)
+  if group == 0 | inst / 2048 % 4 == 1 return result is (
+    Ok(after) then (after, ports, Continue)
+    Err(message) then (cpu, ports, Fault(message))
+  )
+  control(cpu, ports, inst, group, ra, rb, imm)
+)
+
+alu : (State, Nat, Nat, Nat) -> Result(State, Str)
+alu(cpu, op, ra, rb) -> (
+  a = reg(cpu, ra)
+  b = reg(cpu, rb)
+  carry = bit(op % 2 == 1 & cpu.x)
+  op is (
+    0 then Ok(set(cpu, ra, a.and(b)))
+    1 then Ok(set(cpu, ra, a.or(b)))
+    2 then Ok(set(cpu, ra, a.xor(b)))
+    3 then Ok(set(cpu, ra, b))
+    4 then Ok(flag(cpu, a.and(b) != 0))
+    5 then Ok(flag(cpu, a == b))
+    6 then Ok(flag(cpu, a >= b))
+    7 then Ok(flag(cpu, signed_ge(a, b)))
+    # add: bit 0 adds the carry in, bit 1 writes the carry out
+    8..11 then (
+      sum = a + b + carry
+      written = set(cpu, ra, sum)
+      Ok(if op / 2 % 2 == 1 then flag(written, sum > 255) else written)
+    )
+    # sub: bit 0 subtracts the borrow in, bit 1 writes the borrow out
+    12..15 then (
+      subtrahend = b + carry
+      written = set(cpu, ra, a + 512 - subtrahend)
+      Ok(if op / 2 % 2 == 1 then flag(written, a < subtrahend) else written)
+    )
+    16 then Ok(set(cpu, ra, b * 2))
+    17 then Ok(set(cpu, ra, b * 2 + bit(cpu.x)))
+    18 then Ok(flag(set(cpu, ra, b * 2), b >= 128))
+    19 then Ok(flag(set(cpu, ra, b * 2 + bit(cpu.x)), b >= 128))
+    20 then Ok(set(cpu, ra, b / 2))
+    21 then Ok(set(cpu, ra, b / 2 + 128 * bit(cpu.x)))
+    22 then Ok(flag(set(cpu, ra, b / 2), b % 2 == 1))
+    23 then Ok(flag(set(cpu, ra, b / 2 + 128 * bit(cpu.x)), b % 2 == 1))
+    24 then Ok(if cpu.x then set(cpu, ra, b) else cpu)
+    25 then Ok(if cpu.x then cpu else set(cpu, ra, b))
+    26 then Ok(if cpu.x then set(cpu, ra, a + b) else cpu)
+    27 then Ok(if cpu.x then set(cpu, ra, a + 256 - b) else cpu)
+    28 then Ok(set(cpu, ra, 256 - b))
+    29 then Ok(set(cpu, ra, b % 16 * 16 + b / 16))
+    # push: [--b] = a
+    30 then (
+      pushed = set(cpu, rb, b + 255)
+      store(pushed, reg(pushed, rb), reg(pushed, ra))
+    )
+    # pop: a = [b++]
+    _ then (
+      value = load(cpu, b)?
+      popped = set(cpu, ra, value)
+      Ok(set(popped, rb, reg(popped, rb) + 1))
+    )
+  )
+)
+
+immediate : (State, Nat, Nat, Nat) -> State
+immediate(cpu, op, ra, k) -> (
+  a = reg(cpu, ra)
+  op is (
+    0 then set(cpu, ra, a.and(k))
+    1 then set(cpu, ra, a.or(k))
+    2 then set(cpu, ra, a.xor(k))
+    3 then set(cpu, ra, k)
+    4 then flag(cpu, a.and(k) != 0)
+    5 then flag(cpu, a == k)
+    6 then flag(cpu, a >= k)
+    _ then flag(cpu, signed_ge(a, k))
+  )
+)
+
+jump : (State, Nat) -> State
+jump(cpu, pc) -> {pc: byte(pc), *cpu}
+
+continued : Result(State, Str) -> Result((State, Step), Str)
+continued(result) -> result.map_ok(|cpu| (cpu, Continue))
+
+control : (State, Ports, Nat, Nat, Nat, Nat, Nat) -> (State, Ports, Step)
+control(cpu, ports, inst, group, ra, rb, imm) -> (
+  a = reg(cpu, ra)
+  group is (
+    16 then (if cpu.x then jump(cpu, imm) else cpu, ports, Continue)
+    17 then (if cpu.x then cpu else jump(cpu, imm), ports, Continue)
+    18 then (jump(cpu, imm), ports, Continue)
+    19 then (jump(set(cpu, ra, cpu.pc), imm), ports, Continue)
+    20 then (if a != 0 then jump(cpu, imm) else cpu, ports, Continue)
+    21 then (if a == 0 then jump(cpu, imm) else cpu, ports, Continue)
+    22 then (jump(cpu, a + imm), ports, Continue)
+    23 then (if a != 0 then jump(set(cpu, ra, a + 255), imm) else cpu, ports, Continue)
+    24 then faulted(cpu, ports, load(cpu, imm).map_ok(|value| set(cpu, ra, value)))
+    25 then faulted(cpu, ports, store(cpu, imm, a))
+    26 then port_read(ports, imm) is (
+      Ok((Got(value), ports)) then (set(cpu, ra, value), ports, Continue)
+      Ok((_, ports)) then (cpu, ports, Blocked)
+      Err(message) then (cpu, ports, Fault(message))
+    )
+    27 then port_write(ports, imm, a) is (
+      Ok(ports) then (cpu, ports, Continue)
+      Err(message) then (cpu, ports, Fault(message))
+    )
+    28 then faulted(cpu, ports, load(cpu, reg(cpu, rb) + imm).map_ok(|value| set(cpu, ra, value)))
+    29 then faulted(cpu, ports, store(cpu, reg(cpu, rb) + imm, a))
+    30 then (set(cpu, ra, reg(cpu, rb) + imm), ports, Continue)
+    31 then (cpu, ports, Halt)
+    _ then (cpu, ports, Fault("invalid instruction ${inst}"))
+  )
+)
+
+faulted : (State, Ports, Result(State, Str)) -> (State, Ports, Step)
+faulted(_, ports, Ok(after)) -> (after, ports, Continue)
+faulted(cpu, ports, Err(message)) -> (cpu, ports, Fault(message))
+
+main! : Host -> []
+main!(host) -> assemulator!(host, Photon)

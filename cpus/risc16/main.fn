@@ -1,0 +1,173 @@
+# RiSC-16: a 16-bit load-store machine with eight opcodes, eight registers
+# and separate program and data memories of 16-bit words. r0 is always
+# zero, and loads and stores based on it go to the ports.
+#
+#   add  a, b, c   a = b + c          addi a, b, k   a = b + k
+#   nand a, b, c   a = ~(b & c)       lui  a, k      a = k << 6
+#   lw   a, [b+k]  a = mem[b + k]     sw   a, [b+k]  mem[b + k] = a
+#   beq  a, b, L   if a == b goto L   jalr a, b      a = pc; pc = b
+#
+# Pseudo-ops: `add a, k` and `add a, b` add into `a`.
+
+package {
+  assemulator: "../../assemulator/assemulator"
+}
+
+import std.host {Host}
+import assemulator {Argument.*, Ports, Step.*, field, port_read, port_write, assemulator!}
+
+Isa : [Risc16].(
+  register : (Isa, Str) -> Result(Nat, [NotRegister])
+  register(_, "r0") -> Ok(0)
+  register(_, "r1") -> Ok(1)
+  register(_, "r2") -> Ok(2)
+  register(_, "r3") -> Ok(3)
+  register(_, "r4") -> Ok(4)
+  register(_, "r5") -> Ok(5)
+  register(_, "r6") -> Ok(6)
+  register(_, "r7") -> Ok(7)
+  register(_, _) -> Err(NotRegister)
+
+  opcodes : Isa -> List(Str)
+  opcodes(_) -> ["add", "addi", "nand", "lui", "lw", "sw", "beq", "jalr"]
+
+  big_endian : Isa -> Bool
+  big_endian(_) -> True
+
+  encode : (Isa, U64, Str, List(Argument)) -> Result(List(U8), Str)
+  encode(_, address, op, args) -> encoded(address, op, args).map_ok(word_bytes)
+
+  boot : (Isa, U64, List(U8), List(U8)) -> Cpu
+  boot(_, start, program, data) -> Cpu({
+    pc: U16.of_nat(start.to_nat() / 2),
+    regs: List.repeat(U16.zero, 8),
+    program: words(program),
+    data: words(data),
+  })
+)
+
+word_bytes : Nat -> List(U8)
+word_bytes(word) -> [U8.of_nat(word / 256), U8.of_nat(word % 256)]
+
+# Big-endian bytes as words, a trailing odd byte padded with zero.
+words : List(U8) -> List(U16)
+words(bytes) -> (
+  blocks = bytes.blocks(2)
+  whole = blocks.complete.map(|pair| U16.of_nat(pair.get_or(0, U8.zero).to_nat() * 256 + pair.get_or(1, U8.zero).to_nat()))
+  if blocks.remainder is [high] then whole.append(U16.of_nat(high.to_nat() * 256)) else whole
+)
+
+fmt1 : (Nat, Nat, Nat, Nat) -> Result(Nat, Str)
+fmt1(op, a, b, c) -> Ok(op * 8192 + a * 1024 + b * 128 + c)
+
+fmt2 : (Nat, Nat, Nat, U64) -> Result(Nat, Str)
+fmt2(op, a, b, k) -> field(k, 7).map_ok(|imm| op * 8192 + a * 1024 + b * 128 + imm)
+
+fmt3 : (Nat, Nat, U64) -> Result(Nat, Str)
+fmt3(op, a, k) -> field(k, 10).map_ok(|imm| op * 8192 + a * 1024 + imm)
+
+# A byte offset as a word offset, rounding toward zero.
+halved : U64 -> U64
+halved(x) -> if x.to_nat() >= 2.pow(63) then U64.zero - (U64.zero - x) / U64.of_nat(2) else x / U64.of_nat(2)
+
+encoded : (U64, Str, List(Argument)) -> Result(Nat, Str)
+encoded(_, "add", [Reg(a), Reg(b), Reg(c)]) -> fmt1(0, a, b, c)
+encoded(_, "add", [Reg(a), Reg(b), Imm(k)]) -> fmt2(1, a, b, k)
+encoded(_, "addi", [Reg(a), Reg(b), Imm(k)]) -> fmt2(1, a, b, k)
+encoded(_, "nand", [Reg(a), Reg(b), Reg(c)]) -> fmt1(2, a, b, c)
+encoded(_, "lui", [Reg(a), Imm(k)]) -> fmt3(3, a, k)
+# port loads and stores address from r0, e.g. `[char]`
+encoded(_, "lw", [Reg(a), Mem(k)]) -> fmt2(4, a, 0, k)
+encoded(_, "sw", [Reg(a), Mem(k)]) -> fmt2(5, a, 0, k)
+encoded(_, "lw", [Reg(a), MemReg(0, k)]) -> fmt2(4, a, 0, k)
+encoded(_, "sw", [Reg(a), MemReg(0, k)]) -> fmt2(5, a, 0, k)
+# memory loads and stores, converting byte offsets to words
+encoded(_, "lw", [Reg(a), MemReg(b, k)]) -> fmt2(4, a, b, halved(k))
+encoded(_, "sw", [Reg(a), MemReg(b, k)]) -> fmt2(5, a, b, halved(k))
+encoded(address, "beq", [Reg(a), Reg(b), Imm(target)]) -> fmt2(6, a, b, halved(target - address))
+encoded(_, "jalr", [Reg(a), Reg(b)]) -> fmt2(7, a, b, U64.zero)
+# pseudo-ops
+encoded(_, "add", [Reg(a), Imm(k)]) -> fmt2(1, a, a, k)
+encoded(_, "add", [Reg(a), Reg(b)]) -> fmt1(0, a, a, b)
+encoded(_, op, args) -> Err("invalid instruction: ${op} ${args.map(|arg| arg.to_str()).join(", ")}")
+
+Cpu : {pc: U16, regs: List(U16), program: List(U16), data: List(U16)}.(
+  step : (Cpu, Ports) -> (Cpu, Ports, Step)
+  step(Cpu(cpu), ports) -> (
+    at = cpu.pc.to_nat()
+    if at >= cpu.program.len() return (Cpu(cpu), ports, Halt)
+    inst = cpu.program.get_or(at, U16.zero).to_nat()
+    next = {pc: cpu.pc + U16.of_nat(1), *cpu}
+    execute(Cpu(cpu), Cpu(next), ports, decode(inst))
+  )
+
+  show : Cpu -> Str
+  show(Cpu(cpu)) -> "pc: ${cpu.pc * U16.of_nat(2)} regs: ${cpu.regs}"
+)
+
+Decoded = {op: Nat, a: Nat, b: Nat, c: Nat, imm: U16, upper: U16}
+
+decode : Nat -> Decoded
+decode(inst) -> {
+  op: inst / 8192,
+  a: inst / 1024 % 8,
+  b: inst / 128 % 8,
+  c: inst % 8,
+  # the low seven bits, sign-extended
+  imm: U16.of_nat(inst % 128).xor(U16.of_nat(64)) - U16.of_nat(64),
+  upper: U16.of_nat(inst * 64),
+}
+
+reg : (Cpu, Nat) -> U16
+reg(Cpu(cpu), r) -> cpu.regs.get_or(r, U16.zero)
+
+# `r` set to `value`, r0 staying zero.
+set : (Cpu, Nat, U16) -> Cpu
+set(cpu, 0, _) -> cpu
+set(Cpu(cpu), r, value) -> Cpu({regs: cpu.regs.put(r, value), *cpu})
+
+jump : (Cpu, U16) -> Cpu
+jump(Cpu(cpu), pc) -> Cpu({pc, *cpu})
+
+pc_of : Cpu -> U16
+pc_of(Cpu(cpu)) -> cpu.pc
+
+# `before` is the processor as the instruction found it, `after` with its
+# pc moved past it.
+execute : (Cpu, Cpu, Ports, Decoded) -> (Cpu, Ports, Step)
+execute(_, cpu, ports, {op: 0, a, b, c, *}) -> (set(cpu, a, reg(cpu, b) + reg(cpu, c)), ports, Continue)
+execute(_, cpu, ports, {op: 1, a, b, imm, *}) -> (set(cpu, a, reg(cpu, b) + imm), ports, Continue)
+execute(_, cpu, ports, {op: 2, a, b, c, *}) -> (set(cpu, a, reg(cpu, b).and(reg(cpu, c)).not()), ports, Continue)
+execute(_, cpu, ports, {op: 3, a, upper, *}) -> (set(cpu, a, upper), ports, Continue)
+execute(before, cpu, ports, {op: 4, a, b: 0, imm, *}) -> port_read(ports, imm.to_nat()) is (
+  Ok((Got(value), ports)) then (set(cpu, a, U16.of_nat(value)), ports, Continue)
+  Ok((_, ports)) then (before, ports, Blocked)
+  Err(message) then (before, ports, Fault(message))
+)
+execute(before, cpu, ports, {op: 5, a, b: 0, imm, *}) -> port_write(ports, imm.to_nat(), reg(cpu, a).to_nat()) is (
+  Ok(ports) then (cpu, ports, Continue)
+  Err(message) then (before, ports, Fault(message))
+)
+execute(before, Cpu(cpu), ports, {op: 4, a, b, imm, *}) -> (
+  address = (reg(Cpu(cpu), b) + imm).to_nat()
+  cpu.data.get(address) is (
+    Ok(value) then (set(Cpu(cpu), a, value), ports, Continue)
+    Err(_) then (before, ports, Fault("invalid data address ${address}"))
+  )
+)
+execute(before, Cpu(cpu), ports, {op: 5, a, b, imm, *}) -> (
+  address = (reg(Cpu(cpu), b) + imm).to_nat()
+  if address >= cpu.data.len() then (before, ports, Fault("invalid data address ${address}"))
+  else (Cpu({data: cpu.data.put(address, reg(Cpu(cpu), a)), *cpu}), ports, Continue)
+)
+execute(_, cpu, ports, {op: 6, a, b, imm, *}) -> (
+  taken = reg(cpu, a) == reg(cpu, b)
+  (if taken then jump(cpu, pc_of(cpu) + imm - U16.of_nat(1)) else cpu, ports, Continue)
+)
+execute(_, cpu, ports, {a, b, *}) -> (
+  target = reg(cpu, b)
+  (jump(set(cpu, a, pc_of(cpu) * U16.of_nat(2)), target / U16.of_nat(2)), ports, Continue)
+)
+
+main! : Host -> []
+main!(host) -> assemulator!(host, Risc16)

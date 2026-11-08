@@ -1,0 +1,438 @@
+# A two-pass assembler for any instruction set that meets `InstructionSet`.
+#
+# A line is `label: opcode arguments ; comment`, every part optional. An
+# argument is a register, an expression, a memory operand `[base + offset]`
+# with at most one register in it, or a string. Directives begin with `.`:
+#
+#   .u8 .i8 .u16 .i16 .u32 .i32   numbers or strings, a label naming the data
+#   .zero n                       n bytes of zeros
+#   .strz "a", "b"                strings, each ended by a zero byte
+#   name: .set expr               a constant
+#   name: .macro a, b ... .endm   a macro, `$a` in its body its argument
+#   .if expr ... .else ... .endif conditional assembly
+#   ns: .include "file"           a file, its labels under `ns::` if named
+#   .abort                        stop with an error
+#
+# The program starts at the label `main`, or at 0 without one.
+
+import lexer {Token.*, tokenize}
+import symbols {Symbol.*, Symbols, symbols_new, symbols_pass, symbols_lookup, symbols_declare, symbols_qualify, symbols_enter, symbols_leave}
+import expression {evaluate}
+
+export {Argument.*, Assembly, Sources, InstructionSet, assemble, field, resolve_path, includes_of}
+
+# An instruction's operand, as the instruction set's `encode` is handed it.
+Argument : [
+  Reg(Nat),
+  Imm(U64),
+  # `[offset]`, a memory operand without a register.
+  Mem(U64),
+  # `[register + offset]`.
+  MemReg(Nat, U64),
+].(
+  to_str : Argument -> Str
+  to_str(Reg(r)) -> "r${r}"
+  to_str(Imm(x)) -> "${x}"
+  to_str(Mem(x)) -> "[${x}]"
+  to_str(MemReg(r, x)) -> "[r${r} + ${x}]"
+
+  equals : (Argument, Argument) -> Bool
+)
+
+# What an instruction set tells the assembler: its registers' names, its
+# opcodes, how one instruction is encoded at an address, and its byte order.
+# An instruction's length must not depend on its operands' values, since a
+# label defined later is 0 in the first pass.
+InstructionSet(c) = where
+  c.register : (c, Str) -> Result(Nat, [NotRegister]),
+  c.opcodes : c -> List(Str),
+  c.encode : (c, U64, Str, List(Argument)) -> Result(List(U8), Str),
+  c.big_endian : c -> Bool
+
+Assembly = {start: U64, program: List(U8), data: List(U8)}
+
+# Every file the program reads, by path.
+Sources = Map(Str, Str)
+
+Line = {file: Str, number: Nat, text: Str, tokens: List(Token)}
+
+Macro = {params: List(Str), body: List(Line)}
+
+Pending = [NoLabel, Label(Str)]
+
+Asm = {
+  symbols: Symbols,
+  macros: Map(Str, Macro),
+  program: List(U8),
+  data: List(U8),
+  # Files included without a namespace this pass, which are included once.
+  included: List(Str),
+}
+
+Cursor = {asm: Asm, lines: List(Line), pending: Pending, depth: Nat}
+
+# Assemble the file at `path`, which with every file it includes is in
+# `sources`.
+assemble : (c, Sources, Str) -> Result(Assembly, Str) where InstructionSet(c)
+assemble(isa, sources, path) -> (
+  lines = file_lines(sources, path)?
+  empty = {symbols: symbols_new, macros: Map.empty, program: [], data: [], included: []}
+  first = assemble_lines(isa, sources, empty, lines)?
+  second = assemble_lines(isa, sources, {symbols: symbols_pass(first.symbols), program: [], data: [], included: [], *first}, lines)?
+  start = symbols_lookup(second.symbols, "main").ok_or(U64.zero)
+  Ok({start, program: second.program, data: second.data})
+)
+
+# Where `name`, included from `file`, is: beside it, with each `dir/..`
+# taken out, so a file reached two ways is one file.
+resolve_path : (Str, Str) -> Str
+resolve_path(file, name) -> (
+  parts = file.split("/")
+  joined = if parts.len() < 2 then name else "${parts.take(parts.len() - 1).join("/")}/${name}"
+  kept = []
+  for part in joined.split("/") do (
+    if part == "." continue
+    kept = if part == ".." & kept.last() is Ok(last) & last != ".." then kept.take(kept.len() - 1) else kept.append(part)
+  )
+  kept.join("/")
+)
+
+expect resolve_path("cpus/x/games/a.asm", "../ports.asm") == "cpus/x/ports.asm"
+expect resolve_path("a.asm", "ports.asm") == "ports.asm"
+expect resolve_path("../a/b.asm", "../../c.asm") == "../../c.asm"
+
+# The files `text`, at `path`, includes, as paths.
+includes_of : (Str, Str) -> List(Str)
+includes_of(path, text) -> (
+  found = []
+  for line in text.lines() do (
+    tokens = tokenize(line.to_utf8()).ok_or([])
+    (_, rest) = split_label(tokens)
+    if rest is [Word(".include"), Text(name)] then (found = found.append(resolve_path(path, bytes_text(name)))) else {}
+  )
+  found
+)
+
+bytes_text : List(U8) -> Str
+bytes_text(bytes) -> Str.from_utf8(bytes).ok_or("?")
+
+# A message about `line`, with the line beneath it.
+locate : (Line, Str) -> Str
+locate(line, message) -> (
+  number = "${line.number}"
+  gutter = " ".repeat(number.len())
+  "${line.file}:${line.number}: ${message}\n${gutter} |\n${number} | ${line.text}"
+)
+
+located : (Line, Result(a, Str)) -> Result(a, Str)
+located(line, result) -> result.map_err(|message| locate(line, message))
+
+file_lines : (Sources, Str) -> Result(List(Line), Str)
+file_lines(sources, path) -> (
+  text = sources.get(path).map_err(|_| "can't read ${path}")?
+  lines = []
+  number = 0
+  for written in text.lines() do (
+    number = number + 1
+    tokens = tokenize(written.to_utf8()).map_err(|message| "${path}:${number}: ${message}")?
+    lines = lines.append({file: path, number, text: written, tokens})
+  )
+  Ok(lines)
+)
+
+# A line's label, if it starts with `name:`, and the tokens after it.
+split_label : List(Token) -> (Pending, List(Token))
+split_label([Word(name), Op(":"), *rest]) -> (Label(name), rest)
+split_label(tokens) -> (NoLabel, tokens)
+
+# The directive a line's tokens begin with, or `` if none.
+directive_of : List(Token) -> Str
+directive_of([Word(name), *_]) if name.starts_with(".") -> name
+directive_of(_) -> ""
+
+line_directive : Line -> Str
+line_directive(line) -> (
+  (_, tokens) = split_label(line.tokens)
+  directive_of(tokens)
+)
+
+assemble_lines : (c, Sources, Asm, List(Line)) -> Result(Asm, Str) where InstructionSet(c)
+assemble_lines(isa, sources, asm, lines) -> (
+  cursor = {asm, lines, pending: NoLabel, depth: 0}
+  last = {file: "", number: 0, text: "", tokens: []}
+  while cursor.lines is [line, *rest] do (
+    last = line
+    (label, tokens) = split_label(line.tokens)
+    # A label on a line of its own names what follows, unless another
+    # label comes first.
+    asm = located(line, if label is Label(_) then declare_program(cursor.asm, cursor.pending) else Ok(cursor.asm))?
+    pending = if label is Label(_) then label else cursor.pending
+    cursor = handle(isa, sources, {asm, lines: rest, pending, *cursor}, line, directive_of(tokens), tokens)?
+  )
+  if cursor.depth > 0 return Err(locate(last, "missing .endif"))
+  located(last, declare_program(cursor.asm, cursor.pending))
+)
+
+# One line, which for `.macro`, `.if` and `.else` may take the lines after it.
+handle : (c, Sources, Cursor, Line, Str, List(Token)) -> Result(Cursor, Str) where InstructionSet(c)
+handle(_, _, cursor, _, "", []) -> Ok(cursor)
+handle(_, _, cursor, line, ".macro", [_, *params]) -> (
+  cursor.pending is Label(name) else return Err(locate(line, "a macro needs a label naming it"))
+  names = located(line, params.filter(|token| token != Op(",")).try_map(param_name))?
+  end = located(line, cursor.lines.find_index(|next| line_directive(next) == ".endm").map_err(|_| "missing .endm"))?
+  key = symbols_qualify(cursor.asm.symbols, name)
+  macros = cursor.asm.macros.insert(key, {params: names, body: cursor.lines.take(end)})
+  Ok({asm: {macros, *cursor.asm}, lines: cursor.lines.drop(end + 1), pending: NoLabel, *cursor})
+)
+handle(_, _, cursor, line, ".if", [_, *condition]) -> (
+  value = located(line, value_of(cursor.asm, condition))?
+  if value != U64.zero return Ok({depth: cursor.depth + 1, *cursor})
+  skipped = skip(cursor.lines, True)
+  skipped is Ok((Else, rest)) else return (
+    skipped is Ok((_, rest)) else return Err(locate(line, "missing .endif"))
+    Ok({lines: rest, *cursor})
+  )
+  Ok({lines: rest, depth: cursor.depth + 1, *cursor})
+)
+handle(_, _, cursor, line, ".else", _) -> (
+  if cursor.depth == 0 return Err(locate(line, ".else without .if"))
+  skip(cursor.lines, False) is Ok((_, rest)) else return Err(locate(line, "missing .endif"))
+  Ok({lines: rest, depth: cursor.depth - 1, *cursor})
+)
+handle(_, _, cursor, line, ".endif", _) -> (
+  if cursor.depth == 0 return Err(locate(line, ".endif without .if"))
+  Ok({depth: cursor.depth - 1, *cursor})
+)
+handle(isa, sources, cursor, line, name, tokens) -> (
+  asm = work(isa, sources, cursor.asm, line, cursor.pending, name, tokens)?
+  Ok({asm, pending: NoLabel, *cursor})
+)
+
+param_name : Token -> Result(Str, Str)
+param_name(Word(name)) -> Ok(name)
+param_name(token) -> Err("expected a parameter name, found `${token}`")
+
+Skipped = [Else, Endif]
+
+# The lines after the `.else` or `.endif` closing the block that begins
+# `lines`, stepping over nested blocks.
+skip : (List(Line), Bool) -> Result((Skipped, List(Line)), [Missing])
+skip(lines, stop_at_else) -> (
+  depth = 0
+  while lines is [line, *lines] do (
+    (line_directive(line), depth == 0) is (
+      (".if", _) then (depth = depth + 1)
+      (".else", True) if stop_at_else return Ok((Else, lines))
+      (".endif", True) return Ok((Endif, lines))
+      (".endif", False) then (depth = depth - 1)
+      _ then {}
+    )
+  )
+  Err(Missing)
+)
+
+# An expression's value; in the first pass, 0 for one naming a label not
+# yet defined.
+value_of : (Asm, List(Token)) -> Result(U64, Str)
+value_of(asm, tokens) -> evaluate(asm.symbols, tokens) is (
+  Ok(value) then Ok(value)
+  Err(_) if !asm.symbols.final then Ok(U64.zero)
+  Err(message) then Err(message)
+)
+
+declare : (Asm, Pending, Symbol) -> Result(Asm, Str)
+declare(asm, NoLabel, _) -> Ok(asm)
+declare(asm, Label(name), symbol) -> (
+  symbols = symbols_declare(asm.symbols, name, symbol)?
+  Ok({symbols, *asm})
+)
+
+declare_program : (Asm, Pending) -> Result(Asm, Str)
+declare_program(asm, label) -> declare(asm, label, Address(U64.of_nat(asm.program.len())))
+
+declare_data : (Asm, Pending) -> Result(Asm, Str)
+declare_data(asm, label) -> declare(asm, label, Data(U64.of_nat(asm.data.len())))
+
+# Arguments, parted by commas.
+split_args : List(Token) -> List(List(Token))
+split_args([]) -> []
+split_args(tokens) -> (
+  args = []
+  current = []
+  for token in tokens do (
+    if token == Op(",") then (
+      args = args.append(current)
+      current = []
+    ) else (current = current.append(token))
+  )
+  args.append(current)
+)
+
+work : (c, Sources, Asm, Line, Pending, Str, List(Token)) -> Result(Asm, Str) where InstructionSet(c)
+work(isa, sources, asm, line, label, "", [Word(op), *rest]) -> instruction(isa, sources, asm, line, label, op, split_args(rest))
+work(_, _, _, line, _, "", [token, *_]) -> Err(locate(line, "expected an opcode, found `${token}`"))
+work(_, _, asm, line, label, ".set", [_, *expression]) -> located(line, (
+  value = value_of(asm, expression)?
+  declare(asm, label, Value(value))
+))
+work(isa, _, asm, line, label, ".u8", [_, *args]) -> located(line, data(isa, asm, label, 1, False, split_args(args)))
+work(isa, _, asm, line, label, ".i8", [_, *args]) -> located(line, data(isa, asm, label, 1, True, split_args(args)))
+work(isa, _, asm, line, label, ".u16", [_, *args]) -> located(line, data(isa, asm, label, 2, False, split_args(args)))
+work(isa, _, asm, line, label, ".i16", [_, *args]) -> located(line, data(isa, asm, label, 2, True, split_args(args)))
+work(isa, _, asm, line, label, ".u32", [_, *args]) -> located(line, data(isa, asm, label, 4, False, split_args(args)))
+work(isa, _, asm, line, label, ".i32", [_, *args]) -> located(line, data(isa, asm, label, 4, True, split_args(args)))
+work(_, _, asm, line, label, ".zero", [_, *count]) -> located(line, (
+  n = value_of(asm, count)?
+  asm = declare_data(asm, label)?
+  Ok({data: asm.data.concat(List.repeat(U8.zero, n.to_nat())), *asm})
+))
+work(_, _, asm, line, label, ".strz", [_, *args]) -> located(line, (
+  asm = declare_data(asm, label)?
+  data = asm.data
+  for arg in split_args(args) do (
+    arg is [Text(bytes)] else return Err("expected a string")
+    data = data.concat(bytes).append(U8.zero)
+  )
+  Ok({data, *asm})
+))
+work(isa, sources, asm, line, label, ".include", [_, Text(name)]) -> include(isa, sources, asm, line, label, resolve_path(line.file, bytes_text(name)))
+work(_, _, _, line, _, ".include", _) -> Err(locate(line, "expected a file name in quotes"))
+work(_, _, _, line, _, ".abort", _) -> Err(locate(line, "abort called"))
+work(_, _, _, line, _, name, _) -> Err(locate(line, "unknown directive `${name}`"))
+
+include : (c, Sources, Asm, Line, Pending, Str) -> Result(Asm, Str) where InstructionSet(c)
+include(_, _, asm, _, NoLabel, path) if asm.included.contains(path) -> Ok(asm)
+include(isa, sources, asm, line, NoLabel, path) -> (
+  lines = located(line, file_lines(sources, path))?
+  assemble_lines(isa, sources, {included: asm.included.append(path), *asm}, lines)
+)
+include(isa, sources, asm, line, Label(namespace), path) -> (
+  lines = located(line, file_lines(sources, path))?
+  (symbols, outer) = symbols_enter(asm.symbols, namespace)
+  inner = assemble_lines(isa, sources, {symbols, *asm}, lines)?
+  Ok({symbols: symbols_leave(inner.symbols, outer), *inner})
+)
+
+data : (c, Asm, Pending, Nat, Bool, List(List(Token))) -> Result(Asm, Str) where InstructionSet(c)
+data(isa, asm, label, size, signed, args) -> (
+  asm = declare_data(asm, label)?
+  bytes = asm.data
+  for arg in args do (
+    values = (if arg is [Text(text)] then Ok(text.map(|c| U64.of_nat(c.to_nat()))) else (
+      value = value_of(asm, arg)
+      value.and_then(|v| in_range(v, size * 8, signed).map_ok(|_| [v]))
+    ))?
+    for value in values do (
+      bytes = bytes.concat(word_bytes(value, size, isa.big_endian()))
+    )
+  )
+  Ok({data: bytes, *asm})
+)
+
+# The low `size` bytes of `value`, in the given order.
+word_bytes : (U64, Nat, Bool) -> List(U8)
+word_bytes(value, size, big) -> (
+  little = List.range(size).map(|i| U8.of_nat(value.shift_right(8 * i).and(U64.of_nat(255)).to_nat()))
+  if big then little.reverse() else little
+)
+
+# A two's complement word as a signed number, for messages.
+signed_text : U64 -> Str
+signed_text(value) -> if value.to_nat() >= 2.pow(63) then "-${(U64.zero - value).to_nat()}" else "${value.to_nat()}"
+
+in_range : (U64, Nat, Bool) -> Result({}, Str)
+in_range(value, bits, signed) -> (
+  v = value.to_nat()
+  negative = v >= 2.pow(63)
+  magnitude = if negative then 2.pow(64) - v else v
+  limit = if signed then 2.pow(bits - 1) else 2.pow(bits)
+  fits = if negative then signed & magnitude <= limit else magnitude < limit
+  if fits then Ok({}) else Err("${signed_text(value)} does not fit in ${bits} bits")
+)
+
+# `value` masked to a field `bits` wide, refusing one that does not fit,
+# signed or unsigned: what an instruction set's encoder puts in a field.
+field : (U64, Nat) -> Result(Nat, Str)
+field(value, bits) -> (
+  v = value.to_nat()
+  mask = 2.pow(bits) - 1
+  negative = v >= 2.pow(63)
+  too_big = if negative then 2.pow(64) - v > mask else v > mask
+  if too_big then Err("value ${signed_text(value)} does not fit in ${bits} bits") else Ok(v.and(mask))
+)
+
+find_macro : (Asm, Str) -> Result(Macro, [Missing])
+find_macro(asm, name) -> asm.macros.get(symbols_qualify(asm.symbols, name)) is (
+  Ok(found) then Ok(found)
+  Err(_) then asm.macros.get(name)
+)
+
+instruction : (c, Sources, Asm, Line, Pending, Str, List(List(Token))) -> Result(Asm, Str) where InstructionSet(c)
+instruction(isa, sources, asm, line, label, op, args) -> (
+  asm = located(line, declare_program(asm, label))?
+  if find_macro(asm, op) is Ok(template) return expand(isa, sources, asm, line, template, args)
+  if !isa.opcodes().contains(op) return Err(locate(line, "unknown opcode `${op}`"))
+  arguments = located(line, args.try_map(|arg| argument(isa, asm, arg)))?
+  bytes = isa.encode(U64.of_nat(asm.program.len()), op, arguments) is (
+    Ok(bytes) then Ok(bytes)
+    # Operands may hold placeholders for labels not yet defined, so an
+    # instruction is refused only in the final pass.
+    Err(_) if !asm.symbols.final then Ok([])
+    Err(message) then Err(locate(line, message))
+  )
+  encoded = bytes?
+  Ok({program: asm.program.concat(encoded), *asm})
+)
+
+register_of : (c, Token) -> Result(Nat, [NotRegister]) where InstructionSet(c)
+register_of(isa, Word(name)) -> isa.register(name)
+register_of(_, _) -> Err(NotRegister)
+
+argument : (c, Asm, List(Token)) -> Result(Argument, Str) where InstructionSet(c)
+argument(isa, asm, [Op("["), *inner, Op("]")]) -> (
+  bases = []
+  offset = []
+  for token in inner do (
+    register = register_of(isa, token)
+    bases = if register is Ok(r) then bases.append(r) else bases
+    offset = offset.append(if register is Ok(_) then Number(U64.zero) else token)
+  )
+  bases is (
+    [] then value_of(asm, inner).map_ok(Mem)
+    [base] then value_of(asm, offset).map_ok(|value| MemReg(base, value))
+    _ then Err("a memory operand can only use one register")
+  )
+)
+argument(isa, asm, [token]) if register_of(isa, token) is Ok(r) -> Ok(Reg(r))
+argument(_, _, [Text(_)]) -> Err("a string is not an instruction's operand")
+argument(_, asm, tokens) -> value_of(asm, tokens).map_ok(Imm)
+
+expand : (c, Sources, Asm, Line, Macro, List(List(Token))) -> Result(Asm, Str) where InstructionSet(c)
+expand(isa, sources, asm, line, template, args) -> (
+  if args.len() != template.params.len() return Err(locate(line, "macro expects ${template.params.len()} arguments, got ${args.len()}"))
+  body = located(line, template.body.try_map(|inner| substitute(inner, template.params, args)))?
+  assemble_lines(isa, sources, asm, body).map_err(|message| "${message}\n${locate(line, "in expansion of this macro")}")
+)
+
+# A macro body's line with each `$param` replaced by its argument's tokens.
+substitute : (Line, List(Str), List(List(Token))) -> Result(Line, Str)
+substitute(line, params, args) -> (
+  out = []
+  i = 0
+  tokens = line.tokens
+  while i < tokens.len() do (
+    token = tokens.get_or(i, Op(""))
+    dollar = token == Op("$")
+    pieces = (if dollar then param_tokens(line, params, args, tokens.get_or(i + 1, Op("$"))) else Ok([token]))?
+    out = out.concat(pieces)
+    i = i + (if dollar then 2 else 1)
+  )
+  Ok({tokens: out, *line})
+)
+
+param_tokens : (Line, List(Str), List(List(Token)), Token) -> Result(List(Token), Str)
+param_tokens(line, params, args, Word(param)) -> (
+  index = params.find_index(|p| p == param).map_err(|_| locate(line, "unknown macro parameter `${param}`"))?
+  Ok(args.get_or(index, []))
+)
+param_tokens(line, _, _, _) -> Err(locate(line, "expected a parameter after `$`"))

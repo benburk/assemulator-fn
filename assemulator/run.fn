@@ -1,0 +1,164 @@
+# The command line every processor shares, as Rust's `assemulator::run`:
+#
+#   CPU assemble FILE        print the assembled program and data
+#   CPU run FILE [--debug]   run it, printing its state before each step
+#                            and waiting for enter with `--debug`
+
+import std.host {Host, Files, Stdin, Stdout, Mode.*, Chunk}
+import assembler {Assembly, Sources, InstructionSet, assemble, includes_of}
+import ports {Ports, Step.*, Processor, ports_new, port_take_output, port_give_line}
+
+export {assemulator!, load!, hex}
+
+assemulator! : (Host, c) -> [] where
+  InstructionSet(c),
+  c.boot : (c, U64, List(U8), List(U8)) -> p,
+  Processor(p)
+assemulator!(host, isa) -> (
+  status = command!(host, isa, host.args.drop(1))
+  host.exit!(status)
+)
+
+command! : (Host, c, List(Str)) -> U8 where
+  InstructionSet(c),
+  c.boot : (c, U64, List(U8), List(U8)) -> p,
+  Processor(p)
+command!(host, isa, ["assemble", path]) -> (
+  built = build!(host.files, isa, path)
+  show!(host, built)
+)
+command!(host, isa, ["run", path]) -> (
+  built = build!(host.files, isa, path)
+  run!(host, isa, built, False)
+)
+command!(host, isa, ["run", path, "--debug"]) -> (
+  built = build!(host.files, isa, path)
+  run!(host, isa, built, True)
+)
+command!(host, _, _) -> fail!(host, "usage: CPU assemble FILE | CPU run FILE [--debug]")
+
+fail! : (Host, Str) -> U8
+fail!(host, message) -> (
+  wrote = host.stderr.write_all!("error: ${message}\n".to_utf8())
+  1
+)
+
+build! : (Files, c, Str) -> Result(Assembly, Str) where InstructionSet(c)
+build!(files, isa, path) -> (
+  sources = load!(files, path)?
+  assemble(isa, sources, path)
+)
+
+# The file at `path` and every file it includes, however deeply. A file
+# included that can't be read is left out, for the assembler to report
+# where it is included.
+load! : (Files, Str) -> Result(Sources, Str)
+load!(files, path) -> (
+  text = read_file!(files, path)?
+  sources = Map.empty.insert(path, text)
+  pending = includes_of(path, text)
+  while pending is [next, *pending] do (
+    if sources.contains(next) continue
+    read = read_file!(files, next)
+    sources = if read is Ok(included) then sources.insert(next, included) else sources
+    pending = if read is Ok(included) then pending.concat(includes_of(next, included)) else pending
+  )
+  Ok(sources)
+)
+
+read_file! : (Files, Str) -> Result(Str, Str)
+read_file!(files, path) -> (
+  opened = files.open!(path, Read)
+  file = opened.map_err(|error| "can't read ${path}: ${error}")?
+  reading = file.read_to_str!()
+  closing = file.close!()
+  text = reading.map_err(|error| "can't read ${path}: ${error}")?
+  Ok(text)
+)
+
+# Bytes as Rust's `{:#04x?}` writes them, eight to a line.
+hex : List(U8) -> Str
+hex([]) -> "[]"
+hex(bytes) -> (
+  rows = bytes.map(hex_byte)
+  lines = []
+  row = []
+  for cell in rows do (
+    row = row.append(cell)
+    lines = if row.len() == 8 then lines.append(row.join(", ")) else lines
+    row = if row.len() == 8 then [] else row
+  )
+  lines = if row.is_empty() then lines else lines.append(row.join(", "))
+  "[\n    ${lines.join(",\n    ")},\n]"
+)
+
+hex_byte : U8 -> Str
+hex_byte(byte) -> (
+  digits = "0123456789abcdef".to_utf8()
+  n = byte.to_nat()
+  high = digits.get_or(n / 16, '0')
+  low = digits.get_or(n % 16, '0')
+  "0x${Str.from_ascii([high, low]).ok_or("??")}"
+)
+
+show! : (Host, Result(Assembly, Str)) -> U8
+show!(host, Err(message)) -> fail!(host, message)
+show!(host, Ok(assembly)) -> (
+  said = host.println!("Start: ${assembly.start}\nData: ${hex(assembly.data)}\nProgram: ${hex(assembly.program)}")
+  0
+)
+
+run! : (Host, c, Result(Assembly, Str), Bool) -> U8 where
+  InstructionSet(c),
+  c.boot : (c, U64, List(U8), List(U8)) -> p,
+  Processor(p)
+run!(host, _, Err(message), _) -> fail!(host, message)
+run!(host, isa, Ok(assembly), debug) -> (
+  cpu = isa.boot(assembly.start, assembly.program, assembly.data)
+  ports = ports_new
+  # What standard input has given that is not yet a line handed on.
+  buffered = []
+  while True do (
+    paused = pause!(host, debug, cpu)
+    (cpu, ports, step) = cpu.step(ports)
+    (output, ports) = port_take_output(ports)
+    wrote = host.stdout.write_all!(output)
+    step is (
+      Continue continue
+      Halt return 0
+      Fault(message) return fail!(host, message)
+      Blocked then {}
+    )
+    # A read found no input: hand the ports the next line typed, or stop
+    # quietly at the end of input, as Rust's emulator does.
+    next = next_line!(host.stdin, buffered)
+    next is Ok((line, rest)) else return 0
+    buffered = rest
+    ports = port_give_line(ports, line)
+  )
+  0
+)
+
+# With `--debug`, the processor's state, then wait for enter.
+pause! : (Host, Bool, p) -> Result({}, [Ended]) where Processor(p)
+pause!(_, False, _) -> Ok({})
+pause!(host, True, cpu) -> (
+  said = host.print!("${cpu.show()}\n> ")
+  line = next_line!(host.stdin, [])
+  line.map_ok(|_| {})
+)
+
+# The next line of standard input without its ending, and what was read
+# after it; `Ended` once input has ended with nothing left.
+next_line! : (Stdin, List(U8)) -> Result((List(U8), List(U8)), [Ended])
+next_line!(input, buffered) -> (
+  while !buffered.contains('\n') do (
+    chunk = input.read!(4096)
+    chunk is Ok(Data(bytes)) else return (if buffered.is_empty() then Err(Ended) else Ok((buffered, [])))
+    buffered = buffered.concat(bytes)
+  )
+  at = buffered.find_index(|c| c == '\n').ok_or(0)
+  line = buffered.take(at)
+  line = if line.last() == Ok('\r') then line.take(at - 1) else line
+  Ok((line, buffered.drop(at + 1)))
+)

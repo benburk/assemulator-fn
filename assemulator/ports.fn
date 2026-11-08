@@ -1,0 +1,67 @@
+# The ports a processor reads and writes. Port 0 is characters: a write
+# prints one, a read takes the next character of the line the user typed,
+# without its line ending, or 0 for an empty line. Port 1 is the ticker: a
+# write prints an unsigned number and a line's end, a read takes a whole
+# line as a number.
+#
+# Ports never wait themselves. A read with no input to hand answers `Wait`,
+# and the processor stalls; the runner reads another line and steps again.
+
+import lexer {parse_int}
+
+export {Ports, PortRead, Step.*, Processor, ports_new, port_read, port_write, port_take_output, port_give_line}
+
+Ports = {chars: List(U8), lines: List(List(U8)), output: List(U8)}
+
+PortRead = [Got(Nat), Wait]
+
+# What one step of a processor did.
+Step : [Continue, Halt, Blocked, Fault(Str)]
+
+# What a processor offers the runner: a step, given the ports, and a
+# description of its state for `--debug`.
+Processor(p) = where
+  p.step : (p, Ports) -> (p, Ports, Step),
+  p.show : p -> Str
+
+ports_new : Ports
+ports_new = {chars: [], lines: [], output: []}
+
+port_read : (Ports, Nat) -> Result((PortRead, Ports), Str)
+port_read(ports, 0) -> ports.chars is (
+  [c, *chars] then Ok((Got(c.to_nat()), {chars, *ports}))
+  [] then ports.lines is (
+    [line, *lines] then line is (
+      [c, *chars] then Ok((Got(c.to_nat()), {chars, lines, *ports}))
+      [] then Ok((Got(0), {lines, *ports}))
+    )
+    [] then Ok((Wait, ports))
+  )
+)
+port_read(ports, 1) -> ports.lines is (
+  [line, *lines] then (
+    text = Str.from_utf8(line).ok_or("").trim()
+    parse_int(text) is (
+      Ok(value) then Ok((Got(value.to_nat()), {lines, *ports}))
+      Err(message) then Ok((Wait, {lines, output: ports.output.concat("${message}\n".to_utf8()), *ports}))
+    )
+  )
+  [] then Ok((Wait, ports))
+)
+port_read(_, port) -> Err("invalid port address: ${port}")
+
+port_write : (Ports, Nat, Nat) -> Result(Ports, Str)
+port_write(ports, 0, value) if value < 256 -> Ok({output: ports.output.append(U8.of_nat(value)), *ports})
+port_write(_, 0, value) -> Err("${value} is not a char")
+port_write(ports, 1, value) -> Ok({output: ports.output.concat("${value}\n".to_utf8()), *ports})
+port_write(_, port, _) -> Err("invalid port address: ${port}")
+
+port_take_output : Ports -> (List(U8), Ports)
+port_take_output(ports) -> (ports.output, {output: [], *ports})
+
+port_give_line : (Ports, List(U8)) -> Ports
+port_give_line(ports, line) -> {lines: ports.lines.append(line), *ports}
+
+expect port_write(ports_new, 1, 42).map_ok(|p| p.output) == Ok("42\n".to_utf8())
+expect port_read(port_give_line(ports_new, "ab".to_utf8()), 0).map_ok(|(r, p)| (r, p.chars)) == Ok((Got(97), "b".to_utf8()))
+expect port_read(ports_new, 1).map_ok(|(r, _)| r) == Ok(Wait)

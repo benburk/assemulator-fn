@@ -63,3 +63,21 @@ run cpu file *args: build
 # Print a program's assembled bytes, e.g. `just assemble risc16 cpus/risc16/programs/hello.asm`
 assemble cpu file: build
     ./build/{{ cpu }} assemble {{ file }}
+
+# A tour: programs on both CPUs, a game played from a file, assembled bytes and an error
+demo: build
+    #!/usr/bin/env bash
+    set -uo pipefail
+    show() { printf '\n\033[1m$ %s\033[0m\n' "$*"; "$@"; }
+    show ./build/photon run cpus/photon/programs/hello_world.asm
+    show ./build/risc16 run cpus/risc16/programs/hello.asm
+    echo; echo "RiSC-16 has no compare instruction; this sieve masks with 0xff80 instead:"
+    ./build/risc16 run cpus/risc16/programs/sieve.asm | tr '\n' ' '; echo
+    echo; echo "Photon's Collatz sequence from 19, the first ten numbers:"
+    ./build/photon run cpus/photon/programs/collatz.asm | head -10 | tr '\n' ' '; echo
+    echo; echo "Hangman, with the guesses read from a file:"
+    ./build/photon run cpus/photon/programs/games/hangman.asm < cpus/photon/programs/games/hangman.in | tail -4
+    show ./build/risc16 assemble cpus/risc16/programs/countdown.asm
+    printf '        .include "ports.asm"\nmain:   sw r1, [tickr]\n' > cpus/risc16/programs/typo.asm
+    show ./build/risc16 run cpus/risc16/programs/typo.asm
+    rm cpus/risc16/programs/typo.asm

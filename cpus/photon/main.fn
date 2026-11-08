@@ -34,10 +34,10 @@ Isa : [Photon].(
   boot : (Isa, U64, List(U8), List(U8)) -> Cpu
   boot(_, start, program, data) -> Cpu({
     pc: start.to_nat() / 2 % 256,
-    regs: List.repeat(0, 8),
+    regs: List.repeat(U8.zero, 8),
     x: False,
-    program: program.blocks(2).complete.map(|pair| pair.get_or(0, U8.zero).to_nat() * 256 + pair.get_or(1, U8.zero).to_nat()),
-    data: data.map(|byte| byte.to_nat()),
+    program: program.blocks(2).complete.map(|pair| U16.of_nat(pair.get_or(0, U8.zero).to_nat() * 256 + pair.get_or(1, U8.zero).to_nat())),
+    data,
   })
 )
 
@@ -98,13 +98,13 @@ encoded("add", [Reg(a), Imm(x)]) -> field(x, 5).map_ok(|v| to_a(a) + 7680 + to_b
 encoded(op, [Reg(a)]) if code(two_registers, op) is Ok(k) & one_register.contains(op) -> Ok(to_a(a) + to_b(a) + k)
 encoded(op, args) -> Err("invalid instruction: ${op} ${args.map(|arg| arg.to_str()).join(", ")}")
 
-State = {pc: Nat, regs: List(Nat), x: Bool, program: List(Nat), data: List(Nat)}
+State = {pc: Nat, regs: List(U8), x: Bool, program: List(U16), data: List(U8)}
 
 Cpu : State.(
   step : (Cpu, Ports) -> (Cpu, Ports, Step)
   step(Cpu(cpu), ports) -> (
     if cpu.pc >= cpu.program.len() return (Cpu(cpu), ports, Halt)
-    inst = cpu.program.get_or(cpu.pc, 0)
+    inst = cpu.program.get_or(cpu.pc, U16.zero).to_nat()
     next = {pc: (cpu.pc + 1) % 256, *cpu}
     (after, ports, step) = execute(next, ports, inst)
     if step is Continue then (Cpu(after), ports, step) else (Cpu(cpu), ports, step)
@@ -122,10 +122,10 @@ bit(True) -> 1
 bit(False) -> 0
 
 reg : (State, Nat) -> Nat
-reg(cpu, r) -> cpu.regs.get_or(r, 0)
+reg(cpu, r) -> cpu.regs.get_or(r, U8.zero).to_nat()
 
 set : (State, Nat, Nat) -> State
-set(cpu, r, value) -> {regs: cpu.regs.put(r, byte(value)), *cpu}
+set(cpu, r, value) -> {regs: cpu.regs.put(r, U8.of_nat(value)), *cpu}
 
 flag : (State, Bool) -> State
 flag(cpu, x) -> {x, *cpu}
@@ -135,11 +135,11 @@ signed_ge : (Nat, Nat) -> Bool
 signed_ge(a, b) -> (a + 128) % 256 >= (b + 128) % 256
 
 load : (State, Nat) -> Result(Nat, Str)
-load(cpu, address) -> cpu.data.get(byte(address)).map_err(|_| "invalid data address ${byte(address)}")
+load(cpu, address) -> cpu.data.get(byte(address)).map_ok(|value| value.to_nat()).map_err(|_| "invalid data address ${byte(address)}")
 
 store : (State, Nat, Nat) -> Result(State, Str)
 store(cpu, address, value) -> (
-  data = cpu.data.set(byte(address), value).map_err(|_| "invalid data address ${byte(address)}")?
+  data = cpu.data.set(byte(address), U8.of_nat(value)).map_err(|_| "invalid data address ${byte(address)}")?
   Ok({data, *cpu})
 )
 

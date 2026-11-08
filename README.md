@@ -26,7 +26,7 @@ $ just assemble risc16 cpus/risc16/programs/multiplication.asm
 $ just run risc16 cpus/risc16/programs/countdown.asm --debug
 ```
 
-`just` lists the recipes, and `just test` runs the library's `expect`s and then
+`just demo` gives a short tour, `just` lists the recipes, and `just test` runs the library's `expect`s and then
 every example program, checking each against its `.out` file.
 
 ## Assembler features

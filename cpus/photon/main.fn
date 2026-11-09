@@ -105,9 +105,11 @@ Cpu : State.(
   step(Cpu(cpu), ports) -> (
     if cpu.pc >= cpu.program.len() return (Cpu(cpu), ports, Halt)
     inst = cpu.program.get_or(cpu.pc, U16.zero).to_nat()
-    next = {pc: (cpu.pc + 1) % 256, *cpu}
-    (after, ports, step) = execute(next, ports, inst)
-    if step is Continue then (Cpu(after), ports, step) else (Cpu(cpu), ports, step)
+    pc = cpu.pc
+    (after, ports, step) = execute({pc: (pc + 1) % 256, *cpu}, ports, inst)
+    # A stalled read runs again once input comes. Only the pc goes back, so
+    # nothing else holds the old state and each write is made in place.
+    (if step is Blocked then Cpu({pc, *after}) else Cpu(after), ports, step)
   )
 
   show : Cpu -> Str

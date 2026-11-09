@@ -116,21 +116,27 @@ line. See [cpus/risc16/main.fn](cpus/risc16/main.fn), about 170 lines.
   emulator runs from the repo root (as the `just` recipes do), and includes
   like `../ports.asm` are resolved against the including file's path.
 - A local label is looked up in its own scope, then in the scope before it.
-- About 12 million emulated instructions a second, against the Rust version's
-  hundreds of millions, which is plenty for these programs. Most of the time
-  goes to allocating numbers the compiler can't yet prove fit in a word.
+- About 50 million emulated instructions a second, against the Rust version's
+  300 million. `step` hands back the processor without keeping the old one, so
+  each register write is made in place rather than copied.
 - No bitmap screen or real-time buttons yet, as in the Rust version's plans.
 
 ## Faun
 
 The flake builds Faun from the `assemulator-fixes` branch of faun-lang, which
-fixes two compiler bugs found while writing this:
+carries these changes from writing this:
 
 - Programs of more than a few hundred functions failed to build with
   `` `exit!` requires Word, but its argument needs Natural ``: the walk that
   bounds numbers gave up after a fixed 32 rounds and forgot every bound.
 - An `if` on its own line whose branches only assign was refused as a value
   thrown away, though `is` arms that do the same were accepted.
+- That build error now names who handed the number, and says when the walk
+  gave up.
+- `--symbols` keeps frame pointers on x86-64, so `perf record -g` shows call
+  stacks.
+- A step's result of about twenty machine words is returned flat instead of in
+  a heap cell made and freed every step: 2.4 times as fast.
 
 Once the branch is on faun-lang's `main`, point the flake's `faun` input at
 `github:benburk/faun-lang`.

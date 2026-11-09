@@ -97,8 +97,11 @@ Cpu : {pc: U16, regs: List(U16), program: List(U16), data: List(U16)}.(
     at = cpu.pc.to_nat()
     if at >= cpu.program.len() return (Cpu(cpu), ports, Halt)
     inst = cpu.program.get_or(at, U16.zero).to_nat()
-    next = {pc: cpu.pc + U16.of_nat(1), *cpu}
-    execute(Cpu(cpu), Cpu(next), ports, decode(inst))
+    pc = cpu.pc
+    (after, ports, step) = execute(Cpu({pc: pc + U16.of_nat(1), *cpu}), ports, decode(inst))
+    # A stalled read runs again once input comes. Only the pc goes back, so
+    # nothing else holds the old state and each write is made in place.
+    (if step is Blocked then jump(after, pc) else after, ports, step)
   )
 
   show : Cpu -> Str
@@ -132,39 +135,38 @@ jump(Cpu(cpu), pc) -> Cpu({pc, *cpu})
 pc_of : Cpu -> U16
 pc_of(Cpu(cpu)) -> cpu.pc
 
-# `before` is the processor as the instruction found it, `after` with its
-# pc moved past it.
-execute : (Cpu, Cpu, Ports, Decoded) -> (Cpu, Ports, Step)
-execute(_, cpu, ports, {op: 0, a, b, c, *}) -> (set(cpu, a, reg(cpu, b) + reg(cpu, c)), ports, Continue)
-execute(_, cpu, ports, {op: 1, a, b, imm, *}) -> (set(cpu, a, reg(cpu, b) + imm), ports, Continue)
-execute(_, cpu, ports, {op: 2, a, b, c, *}) -> (set(cpu, a, reg(cpu, b).and(reg(cpu, c)).not()), ports, Continue)
-execute(_, cpu, ports, {op: 3, a, upper, *}) -> (set(cpu, a, upper), ports, Continue)
-execute(before, cpu, ports, {op: 4, a, b: 0, imm, *}) -> port_read(ports, imm.to_nat()) is (
+# The processor with its pc moved past the instruction.
+execute : (Cpu, Ports, Decoded) -> (Cpu, Ports, Step)
+execute(cpu, ports, {op: 0, a, b, c, *}) -> (set(cpu, a, reg(cpu, b) + reg(cpu, c)), ports, Continue)
+execute(cpu, ports, {op: 1, a, b, imm, *}) -> (set(cpu, a, reg(cpu, b) + imm), ports, Continue)
+execute(cpu, ports, {op: 2, a, b, c, *}) -> (set(cpu, a, reg(cpu, b).and(reg(cpu, c)).not()), ports, Continue)
+execute(cpu, ports, {op: 3, a, upper, *}) -> (set(cpu, a, upper), ports, Continue)
+execute(cpu, ports, {op: 4, a, b: 0, imm, *}) -> port_read(ports, imm.to_nat()) is (
   Ok((Got(value), ports)) then (set(cpu, a, U16.of_nat(value)), ports, Continue)
-  Ok((_, ports)) then (before, ports, Blocked)
-  Err(message) then (before, ports, Fault(message))
+  Ok((_, ports)) then (cpu, ports, Blocked)
+  Err(message) then (cpu, ports, Fault(message))
 )
-execute(before, cpu, ports, {op: 5, a, b: 0, imm, *}) -> port_write(ports, imm.to_nat(), reg(cpu, a).to_nat()) is (
+execute(cpu, ports, {op: 5, a, b: 0, imm, *}) -> port_write(ports, imm.to_nat(), reg(cpu, a).to_nat()) is (
   Ok(ports) then (cpu, ports, Continue)
-  Err(message) then (before, ports, Fault(message))
+  Err(message) then (cpu, ports, Fault(message))
 )
-execute(before, Cpu(cpu), ports, {op: 4, a, b, imm, *}) -> (
+execute(Cpu(cpu), ports, {op: 4, a, b, imm, *}) -> (
   address = (reg(Cpu(cpu), b) + imm).to_nat()
   cpu.data.get(address) is (
     Ok(value) then (set(Cpu(cpu), a, value), ports, Continue)
-    Err(_) then (before, ports, Fault("invalid data address ${address}"))
+    Err(_) then (Cpu(cpu), ports, Fault("invalid data address ${address}"))
   )
 )
-execute(before, Cpu(cpu), ports, {op: 5, a, b, imm, *}) -> (
+execute(Cpu(cpu), ports, {op: 5, a, b, imm, *}) -> (
   address = (reg(Cpu(cpu), b) + imm).to_nat()
-  if address >= cpu.data.len() then (before, ports, Fault("invalid data address ${address}"))
+  if address >= cpu.data.len() then (Cpu(cpu), ports, Fault("invalid data address ${address}"))
   else (Cpu({data: cpu.data.put(address, reg(Cpu(cpu), a)), *cpu}), ports, Continue)
 )
-execute(_, cpu, ports, {op: 6, a, b, imm, *}) -> (
+execute(cpu, ports, {op: 6, a, b, imm, *}) -> (
   taken = reg(cpu, a) == reg(cpu, b)
   (if taken then jump(cpu, pc_of(cpu) + imm - U16.of_nat(1)) else cpu, ports, Continue)
 )
-execute(_, cpu, ports, {a, b, *}) -> (
+execute(cpu, ports, {a, b, *}) -> (
   target = reg(cpu, b)
   (jump(set(cpu, a, pc_of(cpu) * U16.of_nat(2)), target / U16.of_nat(2)), ports, Continue)
 )

@@ -138,7 +138,7 @@ carries these changes from writing this:
 - Faun no longer has loops, and a name bound again shadows the one before to
   the end of its block. This repo was written with 21 loops and rewritten as
   recursion, folds and clauses, which came out 11% shorter and runs the same
-  instructions; that comparison is in faun-lang's `notes/loops-experiment.md`.
+  instructions; that comparison is in faun-lang's `notes/iteration.md`.
 
 Once the branch is on faun-lang's `main`, point the flake's `faun` input at
 `github:benburk/faun-lang`.

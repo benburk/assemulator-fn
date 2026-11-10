@@ -7,11 +7,11 @@
         ]
       },
       "locked": {
-        "lastModified": 1794191983,
-        "narHash": "sha256-uIiwQQM6YzaLszla5/FOH1qKLMmzD/YbvwIYlqVF3ck=",
+        "lastModified": 1794345435,
+        "narHash": "sha256-MHdv7ThLf3r3z0Kbb4A+4/DwwmsTcK5EqEcStlaoAhg=",
         "ref": "assemulator-fixes",
-        "rev": "991c0fac48f836bdd1a32e48075434289f593141",
-        "revCount": 544,
+        "rev": "82401f441236ce6c68b262bbb9acc56133700063",
+        "revCount": 549,
         "type": "git",
         "url": "file:///vault/repos/faun-lang"
       },

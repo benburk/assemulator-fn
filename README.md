@@ -98,15 +98,15 @@ line. See [cpus/risc16/main.fn](cpus/risc16/main.fn), about 170 lines.
 
 ## Layout
 
-| Path                        | What it holds                                 |
-| --------------------------- | --------------------------------------------- |
-| `assemulator/lexer.fn`      | tokens, numbers, strings                      |
-| `assemulator/expression.fn` | expression evaluation on 64-bit words         |
-| `assemulator/symbols.fn`    | labels, local scopes, include namespaces      |
-| `assemulator/assembler.fn`  | the two passes, directives, macros            |
-| `assemulator/ports.fn`      | the character and number ports                |
-| `assemulator/run.fn`        | the command line, file loading, the step loop |
-| `cpus/*/main.fn`            | one CPU each                                  |
+| Path                        | What it holds                                |
+| --------------------------- | -------------------------------------------- |
+| `assemulator/lexer.fn`      | tokens, numbers, strings                     |
+| `assemulator/expression.fn` | expression evaluation on 64-bit words        |
+| `assemulator/symbols.fn`    | labels, local scopes, include namespaces     |
+| `assemulator/assembler.fn`  | the two passes, directives, macros           |
+| `assemulator/ports.fn`      | the character and number ports               |
+| `assemulator/run.fn`        | the command line, file loading, the stepping |
+| `cpus/*/main.fn`            | one CPU each                                 |
 
 ## How it differs from the Rust version
 
@@ -129,14 +129,16 @@ carries these changes from writing this:
 - Programs of more than a few hundred functions failed to build with
   `` `exit!` requires Word, but its argument needs Natural ``: the walk that
   bounds numbers gave up after a fixed 32 rounds and forgot every bound.
-- An `if` on its own line whose branches only assign was refused as a value
-  thrown away, though `is` arms that do the same were accepted.
 - That build error now names who handed the number, and says when the walk
   gave up.
 - `--symbols` keeps frame pointers on x86-64, so `perf record -g` shows call
   stacks.
 - A step's result of about twenty machine words is returned flat instead of in
   a heap cell made and freed every step: 2.4 times as fast.
+- Faun no longer has loops, and a name bound again shadows the one before to
+  the end of its block. This repo was written with 21 loops and rewritten as
+  recursion, folds and clauses, which came out 11% shorter and runs the same
+  instructions; that comparison is in faun-lang's `notes/loops-experiment.md`.
 
 Once the branch is on faun-lang's `main`, point the flake's `faun` input at
 `github:benburk/faun-lang`.

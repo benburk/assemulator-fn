@@ -46,12 +46,17 @@ operator_at(tokens, at, least) -> tokens.get(at) is (
 binary : (Symbols, List(Token), Nat, Nat) -> Result((U64, Nat), Str)
 binary(symbols, tokens, at, least) -> (
   (left, at) = unary(symbols, tokens, at)?
-  while operator_at(tokens, at, least) is Ok((op, level)) do (
-    (right, next) = binary(symbols, tokens, at + 1, level + 1)?
-    left = apply(op, left, right)?
-    at = next
-  )
-  Ok((left, at))
+  applied(symbols, tokens, left, at, least)
+)
+
+# `left` with each operator after it applied, while they bind at least as
+# tightly as `least`.
+applied : (Symbols, List(Token), U64, Nat, Nat) -> Result((U64, Nat), Str)
+applied(symbols, tokens, left, at, least) -> (
+  operator_at(tokens, at, least) is Ok((op, level)) else return Ok((left, at))
+  (right, next) = binary(symbols, tokens, at + 1, level + 1)?
+  value = apply(op, left, right)?
+  applied(symbols, tokens, value, next, least)
 )
 
 flag : Bool -> U64

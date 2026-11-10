@@ -55,15 +55,19 @@ build!(files, isa, path) -> (
 load! : (Files, Str) -> Result(Sources, Str)
 load!(files, path) -> (
   text = read_file!(files, path)?
-  sources = Map.empty.insert(path, text)
-  pending = includes_of(path, text)
-  while pending is [next, *pending] do (
-    if sources.contains(next) continue
-    read = read_file!(files, next)
-    sources = if read is Ok(included) then sources.insert(next, included) else sources
-    pending = if read is Ok(included) then pending.concat(includes_of(next, included)) else pending
-  )
-  Ok(sources)
+  loaded = loaded!(files, Map.empty.insert(path, text), includes_of(path, text))
+  Ok(loaded)
+)
+
+# `sources` with every file `pending` names, and every file those include.
+loaded! : (Files, Sources, List(Str)) -> Sources
+loaded!(_, sources, []) -> sources
+loaded!(files, sources, [next, *pending]) if sources.contains(next) -> loaded!(files, sources, pending)
+loaded!(files, sources, [next, *pending]) -> (
+  read = read_file!(files, next)
+  sources = if read is Ok(included) then sources.insert(next, included) else sources
+  pending = if read is Ok(included) then pending.concat(includes_of(next, included)) else pending
+  loaded!(files, sources, pending)
 )
 
 read_file! : (Files, Str) -> Result(Str, Str)
@@ -80,16 +84,9 @@ read_file!(files, path) -> (
 hex : List(U8) -> Str
 hex([]) -> "[]"
 hex(bytes) -> (
-  rows = bytes.map(hex_byte)
-  lines = []
-  row = []
-  for cell in rows do (
-    row = row.append(cell)
-    lines = if row.len() == 8 then lines.append(row.join(", ")) else lines
-    row = if row.len() == 8 then [] else row
-  )
-  lines = if row.is_empty() then lines else lines.append(row.join(", "))
-  "[\n    ${lines.join(",\n    ")},\n]"
+  rows = bytes.map(hex_byte).blocks(8)
+  all = if rows.remainder.is_empty() then rows.complete else rows.complete.append(rows.remainder)
+  "[\n    ${all.map(|row| row.join(", ")).join(",\n    ")},\n]"
 )
 
 hex_byte : U8 -> Str
@@ -115,28 +112,30 @@ run! : (Host, c, Result(Assembly, Str), Bool) -> U8 where
 run!(host, _, Err(message), _) -> fail!(host, message)
 run!(host, isa, Ok(assembly), debug) -> (
   cpu = isa.boot(assembly.start, assembly.program, assembly.data)
-  ports = ports_new
-  # What standard input has given that is not yet a line handed on.
-  buffered = []
-  while True do (
-    paused = pause!(host, debug, cpu)
-    (cpu, ports, step) = cpu.step(ports)
-    (output, ports) = port_take_output(ports)
-    wrote = host.stdout.write_all!(output)
-    step is (
-      Continue continue
-      Halt return 0
-      Fault(message) return fail!(host, message)
-      Blocked then {}
-    )
-    # A read found no input: hand the ports the next line typed, or stop
-    # quietly at the end of input, as Rust's emulator does.
-    next = next_line!(host.stdin, buffered)
-    next is Ok((line, rest)) else return 0
-    buffered = rest
-    ports = port_give_line(ports, line)
-  )
-  0
+  steps!(host, debug, cpu, ports_new, [])
+)
+
+# Step `cpu` until it stops. `buffered` is what standard input has given
+# that is not yet a line handed on.
+steps! : (Host, Bool, p, Ports, List(U8)) -> U8 where Processor(p)
+steps!(host, debug, cpu, ports, buffered) -> (
+  paused = pause!(host, debug, cpu)
+  (cpu, ports, step) = cpu.step(ports)
+  (output, ports) = port_take_output(ports)
+  wrote = host.stdout.write_all!(output)
+  stepped!(host, debug, cpu, ports, buffered, step)
+)
+
+stepped! : (Host, Bool, p, Ports, List(U8), Step) -> U8 where Processor(p)
+stepped!(host, debug, cpu, ports, buffered, Continue) -> steps!(host, debug, cpu, ports, buffered)
+stepped!(_, _, _, _, _, Halt) -> 0
+stepped!(host, _, _, _, _, Fault(message)) -> fail!(host, message)
+# A read found no input: hand the ports the next line typed, or stop
+# quietly at the end of input, as Rust's emulator does.
+stepped!(host, debug, cpu, ports, buffered, Blocked) -> (
+  next = next_line!(host.stdin, buffered)
+  next is Ok((line, rest)) else return 0
+  steps!(host, debug, cpu, port_give_line(ports, line), rest)
 )
 
 # With `--debug`, the processor's state, then wait for enter.
@@ -151,12 +150,12 @@ pause!(host, True, cpu) -> (
 # The next line of standard input without its ending, and what was read
 # after it; `Ended` once input has ended with nothing left.
 next_line! : (Stdin, List(U8)) -> Result((List(U8), List(U8)), [Ended])
-next_line!(input, buffered) -> (
-  while !buffered.contains('\n') do (
-    chunk = input.read!(4096)
-    chunk is Ok(Data(bytes)) else return (if buffered.is_empty() then Err(Ended) else Ok((buffered, [])))
-    buffered = buffered.concat(bytes)
-  )
+next_line!(input, buffered) if !buffered.contains('\n') -> (
+  chunk = input.read!(4096)
+  chunk is Ok(Data(bytes)) else return (if buffered.is_empty() then Err(Ended) else Ok((buffered, [])))
+  next_line!(input, buffered.concat(bytes))
+)
+next_line!(_, buffered) -> (
   at = buffered.find_index(|c| c == '\n').ok_or(0)
   line = buffered.take(at)
   line = if line.last() == Ok('\r') then line.take(at - 1) else line

@@ -89,13 +89,14 @@ resolve_path : (Str, Str) -> Str
 resolve_path(file, name) -> (
   parts = file.split("/")
   joined = if parts.len() < 2 then name else "${parts.take(parts.len() - 1).join("/")}/${name}"
-  kept = []
-  for part in joined.split("/") do (
-    if part == "." continue
-    kept = if part == ".." & kept.last() is Ok(last) & last != ".." then kept.take(kept.len() - 1) else kept.append(part)
-  )
-  kept.join("/")
+  joined.split("/").filter(|part| part != ".").fold([], kept_part).join("/")
 )
+
+# The parts of a path so far with `part` after them, a `..` taking off the
+# part before it.
+kept_part : (List(Str), Str) -> List(Str)
+kept_part([*kept, last], "..") if last != ".." -> kept
+kept_part(kept, part) -> kept.append(part)
 
 expect resolve_path("cpus/x/games/a.asm", "../ports.asm") == "cpus/x/ports.asm"
 expect resolve_path("a.asm", "ports.asm") == "ports.asm"
@@ -103,14 +104,12 @@ expect resolve_path("../a/b.asm", "../../c.asm") == "../../c.asm"
 
 # The files `text`, at `path`, includes, as paths.
 includes_of : (Str, Str) -> List(Str)
-includes_of(path, text) -> (
-  found = []
-  for line in text.lines() do (
-    tokens = tokenize(line.to_utf8()).ok_or([])
-    (_, rest) = split_label(tokens)
-    if rest is [Word(".include"), Text(name)] then (found = found.append(resolve_path(path, bytes_text(name)))) else {}
-  )
-  found
+includes_of(path, text) -> text.lines().flat_map(|line| included(path, line))
+
+included : (Str, Str) -> List(Str)
+included(path, line) -> split_label(tokenize(line.to_utf8()).ok_or([])) is (
+  (_, [Word(".include"), Text(name)]) then [resolve_path(path, bytes_text(name))]
+  _ then []
 )
 
 bytes_text : List(U8) -> Str
@@ -130,14 +129,9 @@ located(line, result) -> result.map_err(|message| locate(line, message))
 file_lines : (Sources, Str) -> Result(List(Line), Str)
 file_lines(sources, path) -> (
   text = sources.get(path).map_err(|_| "can't read ${path}")?
-  lines = []
-  number = 0
-  for written in text.lines() do (
-    number = number + 1
-    tokens = tokenize(written.to_utf8()).map_err(|message| "${path}:${number}: ${message}")?
-    lines = lines.append({file: path, number, text: written, tokens})
-  )
-  Ok(lines)
+  text.lines().enumerate().try_map(|(at, written)| tokenize(written.to_utf8())
+    .map_err(|message| "${path}:${at + 1}: ${message}")
+    .map_ok(|tokens| {file: path, number: at + 1, text: written, tokens}))
 )
 
 # A line's label, if it starts with `name:`, and the tokens after it.
@@ -157,20 +151,22 @@ line_directive(line) -> (
 )
 
 assemble_lines : (c, Sources, Asm, List(Line)) -> Result(Asm, Str) where InstructionSet(c)
-assemble_lines(isa, sources, asm, lines) -> (
-  cursor = {asm, lines, pending: NoLabel, depth: 0}
-  last = {file: "", number: 0, text: "", tokens: []}
-  while cursor.lines is [line, *rest] do (
-    last = line
-    (label, tokens) = split_label(line.tokens)
-    # A label on a line of its own names what follows, unless another
-    # label comes first.
-    asm = located(line, if label is Label(_) then declare_program(cursor.asm, cursor.pending) else Ok(cursor.asm))?
-    pending = if label is Label(_) then label else cursor.pending
-    cursor = handle(isa, sources, {asm, lines: rest, pending, *cursor}, line, directive_of(tokens), tokens)?
-  )
+assemble_lines(isa, sources, asm, lines) -> stepped(isa, sources, {asm, lines, pending: NoLabel, depth: 0}, {file: "", number: 0, text: "", tokens: []})
+
+# The lines left in `cursor` assembled, `last` the line before them.
+stepped : (c, Sources, Cursor, Line) -> Result(Asm, Str) where InstructionSet(c)
+stepped(_, _, cursor is {lines: [], *}, last) -> (
   if cursor.depth > 0 return Err(locate(last, "missing .endif"))
   located(last, declare_program(cursor.asm, cursor.pending))
+)
+stepped(isa, sources, cursor is {lines: [line, *rest], *}, _) -> (
+  (label, tokens) = split_label(line.tokens)
+  # A label on a line of its own names what follows, unless another
+  # label comes first.
+  asm = located(line, if label is Label(_) then declare_program(cursor.asm, cursor.pending) else Ok(cursor.asm))?
+  pending = if label is Label(_) then label else cursor.pending
+  next = handle(isa, sources, {asm, lines: rest, pending, *cursor}, line, directive_of(tokens), tokens)?
+  stepped(isa, sources, next, line)
 )
 
 # One line, which for `.macro`, `.if` and `.else` may take the lines after it.
@@ -217,18 +213,16 @@ Skipped = [Else, Endif]
 # The lines after the `.else` or `.endif` closing the block that begins
 # `lines`, stepping over nested blocks.
 skip : (List(Line), Bool) -> Result((Skipped, List(Line)), [Missing])
-skip(lines, stop_at_else) -> (
-  depth = 0
-  while lines is [line, *lines] do (
-    (line_directive(line), depth == 0) is (
-      (".if", _) then (depth = depth + 1)
-      (".else", True) if stop_at_else return Ok((Else, lines))
-      (".endif", True) return Ok((Endif, lines))
-      (".endif", False) then (depth = depth - 1)
-      _ then {}
-    )
-  )
-  Err(Missing)
+skip(lines, stop_at_else) -> skipped(lines, stop_at_else, 0)
+
+skipped : (List(Line), Bool, Nat) -> Result((Skipped, List(Line)), [Missing])
+skipped([], _, _) -> Err(Missing)
+skipped([line, *lines], stop_at_else, depth) -> (line_directive(line), depth) is (
+  (".if", _) then skipped(lines, stop_at_else, depth + 1)
+  (".else", 0) if stop_at_else then Ok((Else, lines))
+  (".endif", 0) then Ok((Endif, lines))
+  (".endif", _) then skipped(lines, stop_at_else, depth - 1)
+  _ then skipped(lines, stop_at_else, depth)
 )
 
 # An expression's value; in the first pass, 0 for one naming a label not
@@ -256,17 +250,13 @@ declare_data(asm, label) -> declare(asm, label, Data(U64.of_nat(asm.data.len()))
 # Arguments, parted by commas.
 split_args : List(Token) -> List(List(Token))
 split_args([]) -> []
-split_args(tokens) -> (
-  args = []
-  current = []
-  for token in tokens do (
-    if token == Op(",") then (
-      args = args.append(current)
-      current = []
-    ) else (current = current.append(token))
-  )
-  args.append(current)
-)
+split_args(tokens) -> tokens.fold([[]], parted)
+
+# The arguments so far with `token` after them, a comma beginning another.
+parted : (List(List(Token)), Token) -> List(List(Token))
+parted(args, Op(",")) -> args.append([])
+parted([*args, current], token) -> args.append(current.append(token))
+parted([], token) -> [[token]]
 
 work : (c, Sources, Asm, Line, Pending, Str, List(Token)) -> Result(Asm, Str) where InstructionSet(c)
 work(isa, sources, asm, line, label, "", [Word(op), *rest]) -> instruction(isa, sources, asm, line, label, op, split_args(rest))
@@ -288,17 +278,17 @@ work(_, _, asm, line, label, ".zero", [_, *count]) -> located(line, (
 ))
 work(_, _, asm, line, label, ".strz", [_, *args]) -> located(line, (
   asm = declare_data(asm, label)?
-  data = asm.data
-  for arg in split_args(args) do (
-    arg is [Text(bytes)] else return Err("expected a string")
-    data = data.concat(bytes).append(U8.zero)
-  )
-  Ok({data, *asm})
+  strings = split_args(args).try_map(terminated)?
+  Ok({data: asm.data.concat(strings.flatten()), *asm})
 ))
 work(isa, sources, asm, line, label, ".include", [_, Text(name)]) -> include(isa, sources, asm, line, label, resolve_path(line.file, bytes_text(name)))
 work(_, _, _, line, _, ".include", _) -> Err(locate(line, "expected a file name in quotes"))
 work(_, _, _, line, _, ".abort", _) -> Err(locate(line, "abort called"))
 work(_, _, _, line, _, name, _) -> Err(locate(line, "unknown directive `${name}`"))
+
+terminated : List(Token) -> Result(List(U8), Str)
+terminated([Text(bytes)]) -> Ok(bytes.append(U8.zero))
+terminated(_) -> Err("expected a string")
 
 include : (c, Sources, Asm, Line, Pending, Str) -> Result(Asm, Str) where InstructionSet(c)
 include(_, _, asm, _, NoLabel, path) if asm.included.contains(path) -> Ok(asm)
@@ -316,18 +306,16 @@ include(isa, sources, asm, line, Label(namespace), path) -> (
 data : (c, Asm, Pending, Nat, Bool, List(List(Token))) -> Result(Asm, Str) where InstructionSet(c)
 data(isa, asm, label, size, signed, args) -> (
   asm = declare_data(asm, label)?
-  bytes = asm.data
-  for arg in args do (
-    values = (if arg is [Text(text)] then Ok(text.map(|c| U64.of_nat(c.to_nat()))) else (
-      value = value_of(asm, arg)
-      value.and_then(|v| in_range(v, size * 8, signed).map_ok(|_| [v]))
-    ))?
-    for value in values do (
-      bytes = bytes.concat(word_bytes(value, size, isa.big_endian()))
-    )
-  )
-  Ok({data: bytes, *asm})
+  values = args.try_map(|arg| data_values(asm, arg, size * 8, signed))?
+  bytes = values.flatten().flat_map(|value| word_bytes(value, size, isa.big_endian()))
+  Ok({data: asm.data.concat(bytes), *asm})
 )
+
+# What one argument of a data directive puts down: a string's bytes, or a
+# number that fits.
+data_values : (Asm, List(Token), Nat, Bool) -> Result(List(U64), Str)
+data_values(_, [Text(text)], _, _) -> Ok(text.map(|c| U64.of_nat(c.to_nat())))
+data_values(asm, arg, bits, signed) -> value_of(asm, arg).and_then(|v| in_range(v, bits, signed).map_ok(|_| [v]))
 
 # The low `size` bytes of `value`, in the given order.
 word_bytes : (U64, Nat, Bool) -> List(U8)
@@ -390,16 +378,11 @@ register_of(_, _) -> Err(NotRegister)
 
 argument : (c, Asm, List(Token)) -> Result(Argument, Str) where InstructionSet(c)
 argument(isa, asm, [Op("["), *inner, Op("]")]) -> (
-  bases = []
-  offset = []
-  for token in inner do (
-    register = register_of(isa, token)
-    bases = if register is Ok(r) then bases.append(r) else bases
-    offset = offset.append(if register is Ok(_) then Number(U64.zero) else token)
-  )
+  bases = inner.filter(|token| register_of(isa, token).is_ok())
+  offset = inner.map(|token| if register_of(isa, token).is_ok() then Number(U64.zero) else token)
   bases is (
     [] then value_of(asm, inner).map_ok(Mem)
-    [base] then value_of(asm, offset).map_ok(|value| MemReg(base, value))
+    [base] then register_of(isa, base).map_err(|_| "").and_then(|r| value_of(asm, offset).map_ok(|value| MemReg(r, value)))
     _ then Err("a memory operand can only use one register")
   )
 )
@@ -416,23 +399,14 @@ expand(isa, sources, asm, line, template, args) -> (
 
 # A macro body's line with each `$param` replaced by its argument's tokens.
 substitute : (Line, List(Str), List(List(Token))) -> Result(Line, Str)
-substitute(line, params, args) -> (
-  out = []
-  i = 0
-  tokens = line.tokens
-  while i < tokens.len() do (
-    token = tokens.get_or(i, Op(""))
-    dollar = token == Op("$")
-    pieces = (if dollar then param_tokens(line, params, args, tokens.get_or(i + 1, Op("$"))) else Ok([token]))?
-    out = out.concat(pieces)
-    i = i + (if dollar then 2 else 1)
-  )
-  Ok({tokens: out, *line})
-)
+substitute(line, params, args) -> substituted(line, params, args, line.tokens, []).map_ok(|tokens| {tokens, *line})
 
-param_tokens : (Line, List(Str), List(List(Token)), Token) -> Result(List(Token), Str)
-param_tokens(line, params, args, Word(param)) -> (
+# `tokens` substituted after `out`.
+substituted : (Line, List(Str), List(List(Token)), List(Token), List(Token)) -> Result(List(Token), Str)
+substituted(_, _, _, [], out) -> Ok(out)
+substituted(line, params, args, [Op("$"), Word(param), *rest], out) -> (
   index = params.find_index(|p| p == param).map_err(|_| locate(line, "unknown macro parameter `${param}`"))?
-  Ok(args.get_or(index, []))
+  substituted(line, params, args, rest, out.concat(args.get_or(index, [])))
 )
-param_tokens(line, _, _, _) -> Err(locate(line, "expected a parameter after `$`"))
+substituted(line, _, _, [Op("$"), *_], _) -> Err(locate(line, "expected a parameter after `$`"))
+substituted(line, params, args, [token, *rest], out) -> substituted(line, params, args, rest, out.append(token))

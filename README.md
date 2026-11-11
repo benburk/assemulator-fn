@@ -1,4 +1,4 @@
-# Faun Assemulator
+# assemulator-fn
 
 An assembler and emulator for toy CPUs, written in
 [Faun](https://github.com/benburk/faun-lang). It ports the Rust

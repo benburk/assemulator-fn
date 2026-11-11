@@ -9,16 +9,15 @@
       "locked": {
         "lastModified": 1794433608,
         "narHash": "sha256-Oxk9Ahf1ZBieWKHgOdeVhircg7T7hm0n1PYCqbx453I=",
-        "ref": "main",
+        "owner": "benburk",
+        "repo": "faun-lang",
         "rev": "4319059b36d197f0e341ae0a5fbc8284a77782f5",
-        "revCount": 554,
-        "type": "git",
-        "url": "https://github.com/benburk/faun-lang"
+        "type": "github"
       },
       "original": {
-        "ref": "main",
-        "type": "git",
-        "url": "https://github.com/benburk/faun-lang"
+        "owner": "benburk",
+        "repo": "faun-lang",
+        "type": "github"
       }
     },
     "nixpkgs": {

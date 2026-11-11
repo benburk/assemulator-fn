@@ -1,7 +1,7 @@
 {
   inputs.nixpkgs.url = "github:nixos/nixpkgs/nixos-26.05";
   # The Faun compiler, from faun-lang's main.
-  inputs.faun.url = "git+https://github.com/benburk/faun-lang?ref=main";
+  inputs.faun.url = "github:benburk/faun-lang";
   inputs.faun.inputs.nixpkgs.follows = "nixpkgs";
 
   outputs =

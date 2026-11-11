@@ -75,6 +75,8 @@ demo: build
     ./build/risc16 run cpus/risc16/programs/sieve.asm | tr '\n' ' '; echo
     echo; echo "Photon's Collatz sequence from 19, the first ten numbers:"
     ./build/photon run cpus/photon/programs/collatz.asm | head -10 | tr '\n' ' '; echo
+    echo; echo "Mira, whose ports are memory addresses, sorts ten numbers:"
+    ./build/mira run cpus/mira/programs/insertion_sort.asm | tr '\n' ' '; echo
     echo; echo "Hangman, with the guesses read from a file:"
     ./build/photon run cpus/photon/programs/games/hangman.asm < cpus/photon/programs/games/hangman.in | tail -4
     show ./build/risc16 assemble cpus/risc16/programs/countdown.asm

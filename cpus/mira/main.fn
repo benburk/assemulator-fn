@@ -1,0 +1,256 @@
+# Mira: an 8-bit accumulator machine with five registers, `a` the
+# accumulator and `x` and `y` also index registers, four flags, five
+# addressing modes, and instructions of one to three bytes. Data addresses
+# from 0xf0 up are the ports. See the README for the encoding.
+
+package {
+  assemulator: "../../assemulator/assemulator"
+}
+
+import std.host {Host}
+import assemulator {Argument.*, Ports, PortRead, Step.*, field, port_read, port_write, assemulator!}
+
+Isa : [Mira].(
+  register : (Isa, Str) -> Result(Nat, [NotRegister])
+  register(_, name) -> ["a", "b", "c", "x", "y"]
+    .find_index(|r| r == name | r.to_utf8().map(|c| c.to_ascii_upper()) == name.to_utf8())
+    .map_err(|_| NotRegister)
+
+  opcodes : Isa -> List(Str)
+  opcodes(_) -> alu_ops.concat(shifts).concat(branches).concat(["mov", "jmp"])
+
+  big_endian : Isa -> Bool
+  big_endian(_) -> True
+
+  encode : (Isa, U64, Str, List(Argument)) -> Result(List(U8), Str)
+  encode(_, _, op, args) -> (
+    operands = args.try_map(operand)?
+    encoded(op, operands, args)
+  )
+
+  boot : (Isa, U64, List(U8), List(U8)) -> Cpu
+  boot(_, start, program, data) -> Cpu({
+    pc: start.to_nat() % 256,
+    regs: List.repeat(U8.zero, 5),
+    sign: False,
+    zero: False,
+    carry: False,
+    overflow: False,
+    program,
+    # RAM fills the address space below the ports.
+    data: if data.len() >= ports_start then data else data.concat(List.repeat(U8.zero, ports_start - data.len())),
+  })
+)
+
+ports_start : Nat
+ports_start = 240
+
+# Each list's opcodes in the order of their codes.
+alu_ops : List(Str)
+alu_ops = ["add", "adc", "sub", "sbc", "cmp", "and", "ior", "xor"]
+
+shifts : List(Str)
+shifts = ["shl", "shr", "rol", "ror", "inc", "dec"]
+
+branches : List(Str)
+branches = ["bpl", "bmi", "bne", "beq", "bcc", "bcs", "bvc", "bvs"]
+
+code : (List(Str), Str) -> Result(Nat, [NotFound])
+code(names, op) -> names.find_index(|name| name == op)
+
+# An operand as Mira encodes it: an addressing mode, 0 to 4 a register and
+# 5 to 7 memory at `[k]`, `[k + x]` and `[k + y]`, with the address byte a
+# memory mode takes; or an immediate.
+Operand : [Mode(Nat, List(U64)), Value(U64)]
+
+operand : Argument -> Result(Operand, Str)
+operand(Reg(r)) -> Ok(Mode(r, []))
+operand(Imm(k)) -> Ok(Value(k))
+operand(Mem(k)) -> Ok(Mode(5, [k]))
+operand(MemReg(3, k)) -> Ok(Mode(6, [k]))
+operand(MemReg(4, k)) -> Ok(Mode(7, [k]))
+operand(MemReg(_, _)) -> Err("only x and y can index memory")
+
+# The instruction byte, then the address and immediate bytes after it.
+bytes : (Nat, List(U64)) -> Result(List(U8), Str)
+bytes(inst, after) -> after.try_map(|k| field(k, 8)).map_ok(|ks| [inst, *ks].map(U8.of_nat))
+
+encoded : (Str, List(Operand), List(Argument)) -> Result(List(U8), Str)
+# group 0: a op= arg
+encoded(op, [Mode(a, at)], _) if code(alu_ops, op) is Ok(k) -> bytes(k * 8 + a, at)
+# group 1: arg op= immediate
+encoded(op, [Mode(a, at), Value(x)], _) if code(alu_ops, op) is Ok(k) -> bytes(64 + k * 8 + a, at.append(x))
+# group 2: a move, where the destination named twice means an immediate
+encoded("mov", [Mode(a, []), Value(x)], _) -> bytes(128 + a * 9, [x])
+encoded("mov", [Mode(a, at), Mode(b, bt)], _) if a != b & (at.is_empty() | bt.is_empty()) -> bytes(128 + a * 8 + b, at.concat(bt))
+# group 3: one-operand operations, and jumps
+encoded(op, [Mode(a, at)], _) if code(shifts, op) is Ok(k) -> bytes(192 + k * 8 + a, at)
+encoded("jmp", [Value(x)], _) -> bytes(240, [x])
+encoded(op, [Value(x)], _) if code(branches, op) is Ok(k) -> bytes(248 + k, [x])
+encoded(op, _, args) -> Err("invalid instruction: ${op} ${args.map(|arg| arg.to_str()).join(", ")}")
+
+State = {
+  pc: Nat,
+  regs: List(U8),
+  sign: Bool,
+  zero: Bool,
+  carry: Bool,
+  overflow: Bool,
+  program: List(U8),
+  data: List(U8),
+}
+
+Cpu : State.(
+  step : (Cpu, Ports) -> (Cpu, Ports, Step)
+  step(Cpu(cpu), ports) -> (
+    if cpu.pc >= cpu.program.len() return (Cpu(cpu), ports, Halt)
+    inst = fetched(cpu, 0)
+    k = fetched(cpu, 1)
+    # Reading a port is what may stall or fail, and an instruction reads
+    # its operand before it writes anything, so that comes first.
+    read = if reads(inst) then load(cpu, ports, inst % 8, k) else Ok((Got(0), ports))
+    read is (
+      Ok((Got(b), ports)) then (
+        k2 = fetched(cpu, 2)
+        pc = (cpu.pc + length(inst)) % 256
+        execute({pc, *cpu}, ports, inst, b % 256, k, k2)
+      )
+      Ok((_, ports)) then (Cpu(cpu), ports, Blocked)
+      Err(message) then (Cpu(cpu), ports, Fault(message))
+    )
+  )
+
+  show : Cpu -> Str
+  show(Cpu(cpu)) -> (
+    names = ["a", "b", "c", "x", "y"]
+    regs = names.zip(cpu.regs).map(|(name, value)| "${name}: ${value}").join(" ")
+    flags = [("n", cpu.sign), ("z", cpu.zero), ("c", cpu.carry), ("v", cpu.overflow)].filter(|(_, set)| set).map(|(name, _)| name).join("")
+    "pc: ${cpu.pc} ${regs} flags: ${flags}"
+  )
+)
+
+fetched : (State, Nat) -> Nat
+fetched(cpu, i) -> cpu.program.get_or(cpu.pc + i, U8.zero).to_nat()
+
+bit : Bool -> Nat
+bit(True) -> 1
+bit(False) -> 0
+
+memory : Nat -> Bool
+memory(mode) -> mode >= 5
+
+# How many bytes `inst` takes: itself, an address for each memory operand,
+# and an immediate.
+length : Nat -> Nat
+length(inst) -> (
+  first = inst / 8 % 8
+  second = inst % 8
+  inst / 64 is (
+    0 then 1 + bit(memory(second))
+    1 then 2 + bit(memory(second))
+    2 then 1 + bit(memory(first)) + bit(memory(second)) + bit(first == second)
+    _ then if first < 6 then 1 + bit(memory(second)) else 2
+  )
+)
+
+# Whether `inst` reads its second operand: all but an immediate move and
+# the jumps do.
+reads : Nat -> Bool
+reads(inst) -> (
+  first = inst / 8 % 8
+  group = inst / 64
+  !(group == 2 & first == inst % 8) & !(group == 3 & first >= 6)
+)
+
+reg : (State, Nat) -> Nat
+reg(cpu, r) -> cpu.regs.get_or(r, U8.zero).to_nat()
+
+# The address a memory mode names, its byte `k` offset by `x` or `y`.
+address : (State, Nat, Nat) -> Nat
+address(_, 5, k) -> k
+address(cpu, 6, k) -> (reg(cpu, 3) + k) % 256
+address(cpu, _, k) -> (reg(cpu, 4) + k) % 256
+
+load : (State, Ports, Nat, Nat) -> Result((PortRead, Ports), Str)
+load(cpu, ports, mode, _) if !memory(mode) -> Ok((Got(reg(cpu, mode)), ports))
+load(cpu, ports, mode, k) -> (
+  at = address(cpu, mode, k)
+  if at < ports_start then Ok((Got(cpu.data.get_or(at, U8.zero).to_nat()), ports))
+  else port_read(ports, at % 16)
+)
+
+stored : (State, Ports, Nat, Nat, Nat) -> (Cpu, Ports, Step)
+stored(cpu, ports, mode, _, value) if !memory(mode) -> (Cpu({regs: cpu.regs.put(mode, U8.of_nat(value)), *cpu}), ports, Continue)
+stored(cpu, ports, mode, k, value) -> (
+  at = address(cpu, mode, k)
+  if at < ports_start then (Cpu({data: cpu.data.put(at, U8.of_nat(value)), *cpu}), ports, Continue)
+  else port_write(ports, at % 16, value) is (
+    Ok(ports) then (Cpu(cpu), ports, Continue)
+    Err(message) then (Cpu(cpu), ports, Fault(message))
+  )
+)
+
+execute : (State, Ports, Nat, Nat, Nat, Nat) -> (Cpu, Ports, Step)
+execute(cpu, ports, inst, b, k, k2) -> (
+  first = inst / 8 % 8
+  second = inst % 8
+  inst / 64 is (
+    # group 0 naming `a` as its operand is a nop
+    0 if second == 0 then (Cpu(cpu), ports, Continue)
+    0 then arithmetic(cpu, ports, first, reg(cpu, 0), b, 0, k)
+    1 then arithmetic(cpu, ports, first, b, if memory(second) then k2 else k, second, k)
+    2 if first == second then stored(cpu, ports, first, k, if memory(first) then k2 else k)
+    2 then stored(cpu, ports, first, k, b)
+    _ if first < 6 then (
+      (result, carry) = shifted(first, b, cpu.carry)
+      stored(signed({carry, *cpu}, result), ports, second, k, result)
+    )
+    _ if first == 6 | holds(cpu, second) then (Cpu({pc: k, *cpu}), ports, Continue)
+    _ then (Cpu(cpu), ports, Continue)
+  )
+)
+
+# `a` op `b`, written to `mode` but for `cmp`, which only sets the flags.
+arithmetic : (State, Ports, Nat, Nat, Nat, Nat, Nat) -> (Cpu, Ports, Step)
+arithmetic(cpu, ports, op, a, b, mode, k) -> (
+  result = alu(op, a, b, bit(cpu.carry))
+  flagged = if op <= 4 then {carry: result < a, overflow: a.xor(result) / 128 != a.xor(b) / 128, *signed(cpu, result)} else signed(cpu, result)
+  if op == 4 then (Cpu(flagged), ports, Continue) else stored(flagged, ports, mode, k, result)
+)
+
+alu : (Nat, Nat, Nat, Nat) -> Nat
+alu(0, a, b, _) -> (a + b) % 256
+alu(1, a, b, carry) -> (a + b + carry) % 256
+alu(3, a, b, carry) -> (a + 512 - b - carry) % 256
+alu(5, a, b, _) -> a.and(b)
+alu(6, a, b, _) -> a.or(b)
+alu(7, a, b, _) -> a.xor(b)
+# sub and cmp
+alu(_, a, b, _) -> (a + 256 - b) % 256
+
+signed : (State, Nat) -> State
+signed(cpu, result) -> {sign: result >= 128, zero: result == 0, *cpu}
+
+# A one-operand operation's result, and the carry after it.
+shifted : (Nat, Nat, Bool) -> (Nat, Bool)
+shifted(0, b, _) -> (b * 2 % 256, b >= 128)
+shifted(1, b, _) -> (b / 2, b % 2 == 1)
+shifted(2, b, carry) -> ((b * 2 + bit(carry)) % 256, b >= 128)
+shifted(3, b, carry) -> (b / 2 + 128 * bit(carry), b % 2 == 1)
+shifted(4, b, carry) -> ((b + 1) % 256, carry)
+shifted(_, b, carry) -> ((b + 255) % 256, carry)
+
+# Whether a branch's condition holds: plus, minus, not equal, equal, carry
+# clear, carry set, overflow clear, overflow set.
+holds : (State, Nat) -> Bool
+holds(cpu, 0) -> !cpu.sign
+holds(cpu, 1) -> cpu.sign
+holds(cpu, 2) -> !cpu.zero
+holds(cpu, 3) -> cpu.zero
+holds(cpu, 4) -> !cpu.carry
+holds(cpu, 5) -> cpu.carry
+holds(cpu, 6) -> !cpu.overflow
+holds(cpu, _) -> cpu.overflow
+
+main! : Host -> []
+main!(host) -> assemulator!(host, Mira)

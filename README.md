@@ -6,16 +6,23 @@ An assembler and emulator for toy CPUs, written in
 write a few small functions, and you get a two-pass assembler, an emulator and
 a command line.
 
-Two CPUs come with it, and they run the Rust repo's example programs unchanged,
-with the same output and the same assembled bytes:
+Three CPUs come with it, and they run the Rust repo's example programs
+unchanged, with the same output and the same assembled bytes:
 
 - [RiSC-16](cpus/risc16/README.md): 16-bit, 8 opcodes, 8 registers
 - [Photon](cpus/photon/README.md): 8-bit words, 16-bit instructions, one flag,
   about 40 opcodes
+- [Mira](cpus/mira/README.md): an 8-bit accumulator machine, 24 opcodes,
+  instructions of one to three bytes, memory operands, and ports at memory
+  addresses
 
 ```console
 $ just run photon cpus/photon/programs/hello_world.asm
 Hello, World!
+$ just run mira cpus/mira/programs/collatz.asm
+19
+58
+...
 $ just run risc16 cpus/risc16/programs/sieve.asm
 2
 3

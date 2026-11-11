@@ -8,21 +8,19 @@ package {
 }
 
 import std.host {Host}
-import assemulator {Argument.*, Ports, PortRead, Step.*, field, port_read, port_write, assemulator!}
+import assemulator {Argument.*, Ports, PortRead, Step.*, field, lowered, named, position, port_read, port_write, assemulator!}
 
 Isa : [Mira].(
-  register : (Isa, Str) -> Result(Nat, [NotRegister])
-  register(_, name) -> ["a", "b", "c", "x", "y"]
-    .find_index(|r| r == name | r.to_utf8().map(|c| c.to_ascii_upper()) == name.to_utf8())
-    .map_err(|_| NotRegister)
+  register : (Isa, Str) -> Result(Register, [NotRegister])
+  register(_, name) -> named(registers, lowered(name)).map_err(|_| NotRegister)
 
-  opcodes : Isa -> List(Str)
-  opcodes(_) -> alu_ops.concat(shifts).concat(branches).concat(["mov", "jmp"])
+  opcode : (Isa, Str) -> Result(Op, [NotOpcode])
+  opcode(_, name) -> named(alu_ops.concat(shifts).concat(branches).concat([Mov, Jmp]), lowered(name)).map_err(|_| NotOpcode)
 
   big_endian : Isa -> Bool
   big_endian(_) -> True
 
-  encode : (Isa, U64, Str, List(Argument)) -> Result(List(U8), Str)
+  encode : (Isa, U64, Op, List(Argument(Register))) -> Result(List(U8), Str)
   encode(_, _, op, args) -> (
     operands = args.try_map(operand)?
     encoded(op, operands, args)
@@ -45,48 +43,64 @@ Isa : [Mira].(
 ports_start : Nat
 ports_start = 240
 
+Register : [A, B, C, X, Y].(
+  to_str : Register -> Str
+  equals : (Register, Register) -> Bool
+)
+
+# In the order of their numbers.
+registers : List(Register)
+registers = [A, B, C, X, Y]
+
+Op : [
+  Add, Adc, Sub, Sbc, Cmp, And, Ior, Xor,
+  Shl, Shr, Rol, Ror, Inc, Dec,
+  Bpl, Bmi, Bne, Beq, Bcc, Bcs, Bvc, Bvs,
+  Mov, Jmp,
+].(
+  to_str : Op -> Str
+  equals : (Op, Op) -> Bool
+)
+
 # Each list's opcodes in the order of their codes.
-alu_ops : List(Str)
-alu_ops = ["add", "adc", "sub", "sbc", "cmp", "and", "ior", "xor"]
+alu_ops : List(Op)
+alu_ops = [Add, Adc, Sub, Sbc, Cmp, And, Ior, Xor]
 
-shifts : List(Str)
-shifts = ["shl", "shr", "rol", "ror", "inc", "dec"]
+shifts : List(Op)
+shifts = [Shl, Shr, Rol, Ror, Inc, Dec]
 
-branches : List(Str)
-branches = ["bpl", "bmi", "bne", "beq", "bcc", "bcs", "bvc", "bvs"]
-
-code : (List(Str), Str) -> Result(Nat, [NotFound])
-code(names, op) -> names.find_index(|name| name == op)
+branches : List(Op)
+branches = [Bpl, Bmi, Bne, Beq, Bcc, Bcs, Bvc, Bvs]
 
 # An operand as Mira encodes it: an addressing mode, 0 to 4 a register and
 # 5 to 7 memory at `[k]`, `[k + x]` and `[k + y]`, with the address byte a
 # memory mode takes; or an immediate.
 Operand : [Mode(Nat, List(U64)), Value(U64)]
 
-operand : Argument -> Result(Operand, Str)
-operand(Reg(r)) -> Ok(Mode(r, []))
+operand : Argument(Register) -> Result(Operand, Str)
+operand(Reg(r)) -> Ok(Mode(position(registers, r).ok_or(0), []))
 operand(Imm(k)) -> Ok(Value(k))
 operand(Mem(k)) -> Ok(Mode(5, [k]))
-operand(MemReg(3, k)) -> Ok(Mode(6, [k]))
-operand(MemReg(4, k)) -> Ok(Mode(7, [k]))
-operand(MemReg(_, _)) -> Err("only x and y can index memory")
+operand(MemReg(X, k)) -> Ok(Mode(6, [k]))
+operand(MemReg(Y, k)) -> Ok(Mode(7, [k]))
+operand(MemReg(r, _)) -> Err("only x and y can index memory, not ${r}")
 
 # The instruction byte, then the address and immediate bytes after it.
 bytes : (Nat, List(U64)) -> Result(List(U8), Str)
 bytes(inst, after) -> after.try_map(|k| field(k, 8)).map_ok(|ks| [inst, *ks].map(U8.of_nat))
 
-encoded : (Str, List(Operand), List(Argument)) -> Result(List(U8), Str)
+encoded : (Op, List(Operand), List(Argument(Register))) -> Result(List(U8), Str)
 # group 0: a op= arg
-encoded(op, [Mode(a, at)], _) if code(alu_ops, op) is Ok(k) -> bytes(k * 8 + a, at)
+encoded(op, [Mode(a, at)], _) if position(alu_ops, op) is Ok(k) -> bytes(k * 8 + a, at)
 # group 1: arg op= immediate
-encoded(op, [Mode(a, at), Value(x)], _) if code(alu_ops, op) is Ok(k) -> bytes(64 + k * 8 + a, at.append(x))
+encoded(op, [Mode(a, at), Value(x)], _) if position(alu_ops, op) is Ok(k) -> bytes(64 + k * 8 + a, at.append(x))
 # group 2: a move, where the destination named twice means an immediate
-encoded("mov", [Mode(a, []), Value(x)], _) -> bytes(128 + a * 9, [x])
-encoded("mov", [Mode(a, at), Mode(b, bt)], _) if a != b & (at.is_empty() | bt.is_empty()) -> bytes(128 + a * 8 + b, at.concat(bt))
+encoded(Mov, [Mode(a, []), Value(x)], _) -> bytes(128 + a * 9, [x])
+encoded(Mov, [Mode(a, at), Mode(b, bt)], _) if a != b & (at.is_empty() | bt.is_empty()) -> bytes(128 + a * 8 + b, at.concat(bt))
 # group 3: one-operand operations, and jumps
-encoded(op, [Mode(a, at)], _) if code(shifts, op) is Ok(k) -> bytes(192 + k * 8 + a, at)
-encoded("jmp", [Value(x)], _) -> bytes(240, [x])
-encoded(op, [Value(x)], _) if code(branches, op) is Ok(k) -> bytes(248 + k, [x])
+encoded(op, [Mode(a, at)], _) if position(shifts, op) is Ok(k) -> bytes(192 + k * 8 + a, at)
+encoded(Jmp, [Value(x)], _) -> bytes(240, [x])
+encoded(op, [Value(x)], _) if position(branches, op) is Ok(k) -> bytes(248 + k, [x])
 encoded(op, _, args) -> Err("invalid instruction: ${op} ${args.map(|arg| arg.to_str()).join(", ")}")
 
 State = {

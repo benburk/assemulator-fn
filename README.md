@@ -71,18 +71,38 @@ cpus/risc16/programs/bad.asm:6: in expansion of this macro
 
 ## Adding a CPU
 
-A CPU is one Faun file. It supplies a value whose type meets the
-`InstructionSet` bound, which tells the assembler about registers and encoding:
+A CPU is one Faun file. It declares its registers and opcodes as types, and
+supplies a value whose type meets the `InstructionSet` bound, which tells the
+assembler how to read their names and how to encode an instruction:
 
 ```ruby
+Register : [R0, R1, R2, R3, R4, R5, R6, R7].(
+  to_str : Register -> Str
+  equals : (Register, Register) -> Bool
+)
+
+Op : [Add, Addi, Nand, Lui, Lw, Sw, Beq, Jalr].(
+  to_str : Op -> Str
+)
+
 Isa : [Risc16].(
-  register : (Isa, Str) -> Result(Nat, [NotRegister])
-  opcodes : Isa -> List(Str)
-  encode : (Isa, U64, Str, List(Argument)) -> Result(List(U8), Str)
+  register : (Isa, Str) -> Result(Register, [NotRegister])
+  register(_, name) -> named(registers, name).map_err(|_| NotRegister)
+
+  opcode : (Isa, Str) -> Result(Op, [NotOpcode])
+  opcode(_, name) -> named([Add, Addi, Nand, Lui, Lw, Sw, Beq, Jalr], name).map_err(|_| NotOpcode)
+
+  encode : (Isa, U64, Op, List(Argument(Register))) -> Result(List(U8), Str)
   big_endian : Isa -> Bool
   boot : (Isa, U64, List(U8), List(U8)) -> Cpu
 )
 ```
+
+`named` finds the constructor whose derived name, in small letters, is the
+name in the source, so no register or opcode is written as text, and the
+assembler hands `encode` an `Op` and `Argument`s holding `Register`s. A
+CPU whose names ignore case passes `lowered(name)`, as Mira and Photon's
+registers do.
 
 `boot` builds a processor from the start address, program and data, and the
 processor meets `Processor`:
@@ -97,17 +117,19 @@ Cpu : State.(
 `step` is pure: it gets the ports and returns them, and the runner does the
 I/O. `Step` is `Continue`, `Halt`, `Blocked` (a port read found no input) or
 `Fault(message)`. Encoding is pattern matching on the opcode and its arguments,
-which reads much like the Rust version's `match`:
+which reads much like the Rust version's `match`, and a misspelled opcode or
+register in it is refused when the CPU is compiled:
 
 ```ruby
-encoded(_, "add", [Reg(a), Reg(b), Reg(c)]) -> fmt1(0, a, b, c)
-encoded(_, "add", [Reg(a), Reg(b), Imm(k)]) -> fmt2(1, a, b, k)
-encoded(_, "lw", [Reg(a), MemReg(b, k)]) -> fmt2(4, a, b, halved(k))
-encoded(address, "beq", [Reg(a), Reg(b), Imm(target)]) -> fmt2(6, a, b, halved(target - address))
+encoded(_, Add, [Reg(a), Reg(b), Reg(c)]) -> fmt1(0, a, b, c)
+encoded(_, Add, [Reg(a), Reg(b), Imm(k)]) -> fmt2(1, a, b, k)
+encoded(_, Lw, [Reg(a), MemReg(R0, k)]) -> fmt2(4, a, R0, k)
+encoded(_, Lw, [Reg(a), MemReg(b, k)]) -> fmt2(4, a, b, halved(k))
+encoded(address, Beq, [Reg(a), Reg(b), Imm(target)]) -> fmt2(6, a, b, halved(target - address))
 ```
 
 Then `main!(host) -> assemulator!(host, Risc16)` gives it the shared command
-line. See [cpus/risc16/main.fn](cpus/risc16/main.fn), about 170 lines.
+line. See [cpus/risc16/main.fn](cpus/risc16/main.fn), about 180 lines.
 
 ## Layout
 

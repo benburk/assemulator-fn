@@ -14,27 +14,19 @@ package {
 }
 
 import std.host {Host}
-import assemulator {Argument.*, Ports, Step.*, field, port_read, port_write, assemulator!}
+import assemulator {Argument.*, Ports, Step.*, field, named, position, port_read, port_write, assemulator!}
 
 Isa : [Risc16].(
-  register : (Isa, Str) -> Result(Nat, [NotRegister])
-  register(_, "r0") -> Ok(0)
-  register(_, "r1") -> Ok(1)
-  register(_, "r2") -> Ok(2)
-  register(_, "r3") -> Ok(3)
-  register(_, "r4") -> Ok(4)
-  register(_, "r5") -> Ok(5)
-  register(_, "r6") -> Ok(6)
-  register(_, "r7") -> Ok(7)
-  register(_, _) -> Err(NotRegister)
+  register : (Isa, Str) -> Result(Register, [NotRegister])
+  register(_, name) -> named(registers, name).map_err(|_| NotRegister)
 
-  opcodes : Isa -> List(Str)
-  opcodes(_) -> ["add", "addi", "nand", "lui", "lw", "sw", "beq", "jalr"]
+  opcode : (Isa, Str) -> Result(Op, [NotOpcode])
+  opcode(_, name) -> named([Add, Addi, Nand, Lui, Lw, Sw, Beq, Jalr], name).map_err(|_| NotOpcode)
 
   big_endian : Isa -> Bool
   big_endian(_) -> True
 
-  encode : (Isa, U64, Str, List(Argument)) -> Result(List(U8), Str)
+  encode : (Isa, U64, Op, List(Argument(Register))) -> Result(List(U8), Str)
   encode(_, address, op, args) -> encoded(address, op, args).map_ok(word_bytes)
 
   boot : (Isa, U64, List(U8), List(U8)) -> Cpu
@@ -44,6 +36,22 @@ Isa : [Risc16].(
     program: words(program),
     data: words(data),
   })
+)
+
+Register : [R0, R1, R2, R3, R4, R5, R6, R7].(
+  to_str : Register -> Str
+  equals : (Register, Register) -> Bool
+)
+
+# In the order of their numbers.
+registers : List(Register)
+registers = [R0, R1, R2, R3, R4, R5, R6, R7]
+
+number : Register -> Nat
+number(r) -> position(registers, r).ok_or(0)
+
+Op : [Add, Addi, Nand, Lui, Lw, Sw, Beq, Jalr].(
+  to_str : Op -> Str
 )
 
 word_bytes : Nat -> List(U8)
@@ -57,38 +65,38 @@ words(bytes) -> (
   if blocks.remainder is [high] then whole.append(U16.of_nat(high.to_nat() * 256)) else whole
 )
 
-fmt1 : (Nat, Nat, Nat, Nat) -> Result(Nat, Str)
-fmt1(op, a, b, c) -> Ok(op * 8192 + a * 1024 + b * 128 + c)
+fmt1 : (Nat, Register, Register, Register) -> Result(Nat, Str)
+fmt1(op, a, b, c) -> Ok(op * 8192 + number(a) * 1024 + number(b) * 128 + number(c))
 
-fmt2 : (Nat, Nat, Nat, U64) -> Result(Nat, Str)
-fmt2(op, a, b, k) -> field(k, 7).map_ok(|imm| op * 8192 + a * 1024 + b * 128 + imm)
+fmt2 : (Nat, Register, Register, U64) -> Result(Nat, Str)
+fmt2(op, a, b, k) -> field(k, 7).map_ok(|imm| op * 8192 + number(a) * 1024 + number(b) * 128 + imm)
 
-fmt3 : (Nat, Nat, U64) -> Result(Nat, Str)
-fmt3(op, a, k) -> field(k, 10).map_ok(|imm| op * 8192 + a * 1024 + imm)
+fmt3 : (Nat, Register, U64) -> Result(Nat, Str)
+fmt3(op, a, k) -> field(k, 10).map_ok(|imm| op * 8192 + number(a) * 1024 + imm)
 
 # A byte offset as a word offset, rounding toward zero.
 halved : U64 -> U64
 halved(x) -> if x.to_nat() >= 2.pow(63) then U64.zero - (U64.zero - x) / U64.of_nat(2) else x / U64.of_nat(2)
 
-encoded : (U64, Str, List(Argument)) -> Result(Nat, Str)
-encoded(_, "add", [Reg(a), Reg(b), Reg(c)]) -> fmt1(0, a, b, c)
-encoded(_, "add", [Reg(a), Reg(b), Imm(k)]) -> fmt2(1, a, b, k)
-encoded(_, "addi", [Reg(a), Reg(b), Imm(k)]) -> fmt2(1, a, b, k)
-encoded(_, "nand", [Reg(a), Reg(b), Reg(c)]) -> fmt1(2, a, b, c)
-encoded(_, "lui", [Reg(a), Imm(k)]) -> fmt3(3, a, k)
+encoded : (U64, Op, List(Argument(Register))) -> Result(Nat, Str)
+encoded(_, Add, [Reg(a), Reg(b), Reg(c)]) -> fmt1(0, a, b, c)
+encoded(_, Add, [Reg(a), Reg(b), Imm(k)]) -> fmt2(1, a, b, k)
+encoded(_, Addi, [Reg(a), Reg(b), Imm(k)]) -> fmt2(1, a, b, k)
+encoded(_, Nand, [Reg(a), Reg(b), Reg(c)]) -> fmt1(2, a, b, c)
+encoded(_, Lui, [Reg(a), Imm(k)]) -> fmt3(3, a, k)
 # port loads and stores address from r0, e.g. `[char]`
-encoded(_, "lw", [Reg(a), Mem(k)]) -> fmt2(4, a, 0, k)
-encoded(_, "sw", [Reg(a), Mem(k)]) -> fmt2(5, a, 0, k)
-encoded(_, "lw", [Reg(a), MemReg(0, k)]) -> fmt2(4, a, 0, k)
-encoded(_, "sw", [Reg(a), MemReg(0, k)]) -> fmt2(5, a, 0, k)
+encoded(_, Lw, [Reg(a), Mem(k)]) -> fmt2(4, a, R0, k)
+encoded(_, Sw, [Reg(a), Mem(k)]) -> fmt2(5, a, R0, k)
+encoded(_, Lw, [Reg(a), MemReg(R0, k)]) -> fmt2(4, a, R0, k)
+encoded(_, Sw, [Reg(a), MemReg(R0, k)]) -> fmt2(5, a, R0, k)
 # memory loads and stores, converting byte offsets to words
-encoded(_, "lw", [Reg(a), MemReg(b, k)]) -> fmt2(4, a, b, halved(k))
-encoded(_, "sw", [Reg(a), MemReg(b, k)]) -> fmt2(5, a, b, halved(k))
-encoded(address, "beq", [Reg(a), Reg(b), Imm(target)]) -> fmt2(6, a, b, halved(target - address))
-encoded(_, "jalr", [Reg(a), Reg(b)]) -> fmt2(7, a, b, U64.zero)
+encoded(_, Lw, [Reg(a), MemReg(b, k)]) -> fmt2(4, a, b, halved(k))
+encoded(_, Sw, [Reg(a), MemReg(b, k)]) -> fmt2(5, a, b, halved(k))
+encoded(address, Beq, [Reg(a), Reg(b), Imm(target)]) -> fmt2(6, a, b, halved(target - address))
+encoded(_, Jalr, [Reg(a), Reg(b)]) -> fmt2(7, a, b, U64.zero)
 # pseudo-ops
-encoded(_, "add", [Reg(a), Imm(k)]) -> fmt2(1, a, a, k)
-encoded(_, "add", [Reg(a), Reg(b)]) -> fmt1(0, a, a, b)
+encoded(_, Add, [Reg(a), Imm(k)]) -> fmt2(1, a, a, k)
+encoded(_, Add, [Reg(a), Reg(b)]) -> fmt1(0, a, a, b)
 encoded(_, op, args) -> Err("invalid instruction: ${op} ${args.map(|arg| arg.to_str()).join(", ")}")
 
 Cpu : {pc: U16, regs: List(U16), program: List(U16), data: List(U16)}.(

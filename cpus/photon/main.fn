@@ -8,27 +8,19 @@ package {
 }
 
 import std.host {Host}
-import assemulator {Argument.*, Ports, Step.*, field, port_read, port_write, assemulator!}
+import assemulator {Argument.*, Ports, Step.*, field, lowered, named, position, port_read, port_write, assemulator!}
 
 Isa : [Photon].(
-  register : (Isa, Str) -> Result(Nat, [NotRegister])
-  register(_, name) -> ["a", "b", "c", "d", "e", "f", "g", "h"]
-    .find_index(|r| r == name | r.to_utf8().map(|c| c.to_ascii_upper()) == name.to_utf8())
-    .map_err(|_| NotRegister)
+  register : (Isa, Str) -> Result(Register, [NotRegister])
+  register(_, name) -> named(registers, lowered(name)).map_err(|_| NotRegister)
 
-  opcodes : Isa -> List(Str)
-  opcodes(_) -> [
-    "and", "or", "xor", "mov", "tst", "eq", "geq", "ges",
-    "add", "addc", "addx", "addb", "sub", "subc", "subx", "subb",
-    "shl", "shlc", "shlx", "shlb", "shr", "shrc", "shrx", "shrb",
-    "mvt", "mvf", "cad", "csb", "neg", "swap", "psh", "pop",
-    "bt", "bf", "jmp", "jsr", "btd", "ld", "st", "pld", "pst", "ret", "halt",
-  ]
+  opcode : (Isa, Str) -> Result(Op, [NotOpcode])
+  opcode(_, name) -> named(two_registers.concat([Bt, Bf, Jmp, Jsr, Btd, Ld, St, Pld, Pst, Ret, Halt]), name).map_err(|_| NotOpcode)
 
   big_endian : Isa -> Bool
   big_endian(_) -> True
 
-  encode : (Isa, U64, Str, List(Argument)) -> Result(List(U8), Str)
+  encode : (Isa, U64, Op, List(Argument(Register))) -> Result(List(U8), Str)
   encode(_, _, op, args) -> encoded(op, args).map_ok(|word| [U8.of_nat(word / 256), U8.of_nat(word % 256)])
 
   boot : (Isa, U64, List(U8), List(U8)) -> Cpu
@@ -41,61 +33,79 @@ Isa : [Photon].(
   })
 )
 
+Register : [A, B, C, D, E, F, G, H].(
+  to_str : Register -> Str
+  equals : (Register, Register) -> Bool
+)
+
+# In the order of their numbers.
+registers : List(Register)
+registers = [A, B, C, D, E, F, G, H]
+
 # Register `a` in its field, and register `b` in its.
-to_a : Nat -> Nat
-to_a(r) -> r * 8192
+to_a : Register -> Nat
+to_a(r) -> position(registers, r).ok_or(0) * 8192
 
-to_b : Nat -> Nat
-to_b(r) -> r * 32
+to_b : Register -> Nat
+to_b(r) -> position(registers, r).ok_or(0) * 32
 
-two_registers : List(Str)
+Op : [
+  And, Or, Xor, Mov, Tst, Eq, Geq, Ges,
+  Add, Addc, Addx, Addb, Sub, Subc, Subx, Subb,
+  Shl, Shlc, Shlx, Shlb, Shr, Shrc, Shrx, Shrb,
+  Mvt, Mvf, Cad, Csb, Neg, Swap, Psh, Pop,
+  Bt, Bf, Jmp, Jsr, Btd, Ld, St, Pld, Pst, Ret, Halt,
+].(
+  to_str : Op -> Str
+  equals : (Op, Op) -> Bool
+)
+
+# Each list's opcodes in the order of their codes.
+two_registers : List(Op)
 two_registers = [
-  "and", "or", "xor", "mov", "tst", "eq", "geq", "ges",
-  "add", "addc", "addx", "addb", "sub", "subc", "subx", "subb",
-  "shl", "shlc", "shlx", "shlb", "shr", "shrc", "shrx", "shrb",
-  "mvt", "mvf", "cad", "csb", "neg", "swap", "psh", "pop",
+  And, Or, Xor, Mov, Tst, Eq, Geq, Ges,
+  Add, Addc, Addx, Addb, Sub, Subc, Subx, Subb,
+  Shl, Shlc, Shlx, Shlb, Shr, Shrc, Shrx, Shrb,
+  Mvt, Mvf, Cad, Csb, Neg, Swap, Psh, Pop,
 ]
 
 # The ALU operations that take an immediate, and the shifts, negation and
 # swap, which may name one register for both operands.
-immediates : List(Str)
-immediates = ["and", "or", "xor", "mov", "tst", "eq", "geq", "ges"]
+immediates : List(Op)
+immediates = [And, Or, Xor, Mov, Tst, Eq, Geq, Ges]
 
-one_register : List(Str)
-one_register = ["shl", "shlc", "shlx", "shlb", "shr", "shrc", "shrx", "shrb", "neg", "swap"]
+one_register : List(Op)
+one_register = [Shl, Shlc, Shlx, Shlb, Shr, Shrc, Shrx, Shrb, Neg, Swap]
 
 # Branches on the flag, and branches on a register.
-flag_branches : List(Str)
-flag_branches = ["bt", "bf", "jmp"]
+flag_branches : List(Op)
+flag_branches = [Bt, Bf, Jmp]
 
-register_branches : List(Str)
-register_branches = ["jsr", "bt", "bf", "jmp", "btd"]
-
-code : (List(Str), Str) -> Result(Nat, [NotFound])
-code(names, op) -> names.find_index(|name| name == op)
+register_branches : List(Op)
+register_branches = [Jsr, Bt, Bf, Jmp, Btd]
 
 # A branch target, a byte address, as the word address it holds.
 target : U64 -> Result(Nat, Str)
 target(address) -> field(address / U64.of_nat(2), 8)
 
-encoded : (Str, List(Argument)) -> Result(Nat, Str)
-encoded(op, [Reg(a), Reg(b)]) if code(two_registers, op) is Ok(k) -> Ok(to_a(a) + to_b(b) + k)
-encoded(op, [Reg(a), Imm(x)]) if code(immediates, op) is Ok(k) -> field(x, 8).map_ok(|v| to_a(a) + 2048 + k * 256 + v)
-encoded(op, [Imm(x)]) if code(flag_branches, op) is Ok(k) -> target(x).map_ok(|v| 4096 + k * 256 + v)
-encoded(op, [Reg(a), Imm(x)]) if code(register_branches, op) is Ok(k) -> target(x).map_ok(|v| to_a(a) + 4864 + k * 256 + v)
-encoded("ld", [Reg(a), Mem(x)]) -> field(x, 8).map_ok(|v| to_a(a) + 6144 + v)
-encoded("st", [Reg(a), Mem(x)]) -> field(x, 8).map_ok(|v| to_a(a) + 6400 + v)
-encoded("pld", [Reg(a), Imm(x)]) -> field(x, 8).map_ok(|v| to_a(a) + 6656 + v)
-encoded("pst", [Reg(a), Imm(x)]) -> field(x, 8).map_ok(|v| to_a(a) + 6912 + v)
-encoded("ld", [Reg(a), MemReg(b, x)]) -> field(x, 5).map_ok(|v| to_a(a) + 7168 + to_b(b) + v)
-encoded("st", [Reg(a), MemReg(b, x)]) -> field(x, 5).map_ok(|v| to_a(a) + 7424 + to_b(b) + v)
-encoded("add", [Reg(a), Reg(b), Imm(x)]) -> field(x, 5).map_ok(|v| to_a(a) + 7680 + to_b(b) + v)
-encoded("jsr", [Imm(x)]) -> target(x).map_ok(|v| 62208 + v)
-encoded("ret", []) -> Ok(62976)
-encoded("halt", []) -> Ok(7936)
+encoded : (Op, List(Argument(Register))) -> Result(Nat, Str)
+encoded(op, [Reg(a), Reg(b)]) if position(two_registers, op) is Ok(k) -> Ok(to_a(a) + to_b(b) + k)
+encoded(op, [Reg(a), Imm(x)]) if position(immediates, op) is Ok(k) -> field(x, 8).map_ok(|v| to_a(a) + 2048 + k * 256 + v)
+encoded(op, [Imm(x)]) if position(flag_branches, op) is Ok(k) -> target(x).map_ok(|v| 4096 + k * 256 + v)
+encoded(op, [Reg(a), Imm(x)]) if position(register_branches, op) is Ok(k) -> target(x).map_ok(|v| to_a(a) + 4864 + k * 256 + v)
+encoded(Ld, [Reg(a), Mem(x)]) -> field(x, 8).map_ok(|v| to_a(a) + 6144 + v)
+encoded(St, [Reg(a), Mem(x)]) -> field(x, 8).map_ok(|v| to_a(a) + 6400 + v)
+encoded(Pld, [Reg(a), Imm(x)]) -> field(x, 8).map_ok(|v| to_a(a) + 6656 + v)
+encoded(Pst, [Reg(a), Imm(x)]) -> field(x, 8).map_ok(|v| to_a(a) + 6912 + v)
+encoded(Ld, [Reg(a), MemReg(b, x)]) -> field(x, 5).map_ok(|v| to_a(a) + 7168 + to_b(b) + v)
+encoded(St, [Reg(a), MemReg(b, x)]) -> field(x, 5).map_ok(|v| to_a(a) + 7424 + to_b(b) + v)
+encoded(Add, [Reg(a), Reg(b), Imm(x)]) -> field(x, 5).map_ok(|v| to_a(a) + 7680 + to_b(b) + v)
+encoded(Jsr, [Imm(x)]) -> target(x).map_ok(|v| 62208 + v)
+encoded(Ret, []) -> Ok(62976)
+encoded(Halt, []) -> Ok(7936)
 # pseudo-ops
-encoded("add", [Reg(a), Imm(x)]) -> field(x, 5).map_ok(|v| to_a(a) + 7680 + to_b(a) + v)
-encoded(op, [Reg(a)]) if code(two_registers, op) is Ok(k) & one_register.contains(op) -> Ok(to_a(a) + to_b(a) + k)
+encoded(Add, [Reg(a), Imm(x)]) -> field(x, 5).map_ok(|v| to_a(a) + 7680 + to_b(a) + v)
+encoded(op, [Reg(a)]) if position(two_registers, op) is Ok(k) & one_register.contains(op) -> Ok(to_a(a) + to_b(a) + k)
 encoded(op, args) -> Err("invalid instruction: ${op} ${args.map(|arg| arg.to_str()).join(", ")}")
 
 State = {pc: Nat, regs: List(U8), x: Bool, program: List(U16), data: List(U8)}

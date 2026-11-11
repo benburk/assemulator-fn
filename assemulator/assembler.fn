@@ -19,34 +19,36 @@ import lexer {Token.*, tokenize}
 import symbols {Symbol.*, Symbols, symbols_new, symbols_pass, symbols_lookup, symbols_declare, symbols_qualify}
 import expression {evaluate}
 
-export {Argument.*, Assembly, Sources, InstructionSet, assemble, field, resolve_path, includes_of}
+export {Argument.*, Assembly, Sources, InstructionSet, assemble, field, lowered, named, position, resolve_path, includes_of}
 
-# An instruction's operand, as the instruction set's `encode` is handed it.
-Argument : [
-  Reg(Nat),
+# An instruction's operand, as the instruction set's `encode` is handed it,
+# `r` being the instruction set's registers.
+Argument(r) : [
+  Reg(r),
   Imm(U64),
   # `[offset]`, a memory operand without a register.
   Mem(U64),
   # `[register + offset]`.
-  MemReg(Nat, U64),
+  MemReg(r, U64),
 ].(
-  to_str : Argument -> Str
-  to_str(Reg(r)) -> "r${r}"
+  to_str : Argument(r) -> Str where r.to_str : r -> Str
+  to_str(Reg(r)) -> r.to_str()
   to_str(Imm(x)) -> "${x}"
   to_str(Mem(x)) -> "[${x}]"
-  to_str(MemReg(r, x)) -> "[r${r} + ${x}]"
+  to_str(MemReg(r, x)) -> "[${r} + ${x}]"
 
-  equals : (Argument, Argument) -> Bool
+  equals : (Argument(r), Argument(r)) -> Bool where r.equals : (r, r) -> Bool
 )
 
-# What an instruction set tells the assembler: its registers' names, its
-# opcodes, how one instruction is encoded at an address, and its byte order.
+# What an instruction set tells the assembler: which register `r` and which
+# opcode `o` a name is, how one instruction is encoded at an address, and
+# its byte order.
 # An instruction's length must not depend on its operands' values, since a
 # label defined later is 0 in the first pass.
-InstructionSet(c) = where
-  c.register : (c, Str) -> Result(Nat, [NotRegister]),
-  c.opcodes : c -> List(Str),
-  c.encode : (c, U64, Str, List(Argument)) -> Result(List(U8), Str),
+InstructionSet(c, r, o) = where
+  c.register : (c, Str) -> Result(r, [NotRegister]),
+  c.opcode : (c, Str) -> Result(o, [NotOpcode]),
+  c.encode : (c, U64, o, List(Argument(r))) -> Result(List(U8), Str),
   c.big_endian : c -> Bool
 
 Assembly = {start: U64, program: List(U8), data: List(U8)}
@@ -73,7 +75,7 @@ Cursor = {asm: Asm, lines: List(Line), pending: Pending, depth: Nat}
 
 # Assemble the file at `path`, which with every file it includes is in
 # `sources`.
-assemble : (c, Sources, Str) -> Result(Assembly, Str) where InstructionSet(c)
+assemble : (c, Sources, Str) -> Result(Assembly, Str) where InstructionSet(c, r, o)
 assemble(isa, sources, path) -> (
   lines = file_lines(sources, path)?
   empty = {symbols: symbols_new, macros: Map.empty, program: [], data: [], included: []}
@@ -150,11 +152,11 @@ line_directive(line) -> (
   directive_of(tokens)
 )
 
-assemble_lines : (c, Sources, Asm, List(Line)) -> Result(Asm, Str) where InstructionSet(c)
+assemble_lines : (c, Sources, Asm, List(Line)) -> Result(Asm, Str) where InstructionSet(c, r, o)
 assemble_lines(isa, sources, asm, lines) -> stepped(isa, sources, {asm, lines, pending: NoLabel, depth: 0}, {file: "", number: 0, text: "", tokens: []})
 
 # The lines left in `cursor` assembled, `last` the line before them.
-stepped : (c, Sources, Cursor, Line) -> Result(Asm, Str) where InstructionSet(c)
+stepped : (c, Sources, Cursor, Line) -> Result(Asm, Str) where InstructionSet(c, r, o)
 stepped(_, _, cursor is {lines: [], *}, last) -> (
   if cursor.depth > 0 return Err(locate(last, "missing .endif"))
   located(last, declare_program(cursor.asm, cursor.pending))
@@ -170,7 +172,7 @@ stepped(isa, sources, cursor is {lines: [line, *rest], *}, _) -> (
 )
 
 # One line, which for `.macro`, `.if` and `.else` may take the lines after it.
-handle : (c, Sources, Cursor, Line, Str, List(Token)) -> Result(Cursor, Str) where InstructionSet(c)
+handle : (c, Sources, Cursor, Line, Str, List(Token)) -> Result(Cursor, Str) where InstructionSet(c, r, o)
 handle(_, _, cursor, _, "", []) -> Ok(cursor)
 handle(_, _, cursor, line, ".macro", [_, *params]) -> (
   cursor.pending is Label(name) else return Err(locate(line, "a macro needs a label naming it"))
@@ -258,7 +260,7 @@ parted(args, Op(",")) -> args.append([])
 parted([*args, current], token) -> args.append(current.append(token))
 parted([], token) -> [[token]]
 
-work : (c, Sources, Asm, Line, Pending, Str, List(Token)) -> Result(Asm, Str) where InstructionSet(c)
+work : (c, Sources, Asm, Line, Pending, Str, List(Token)) -> Result(Asm, Str) where InstructionSet(c, r, o)
 work(isa, sources, asm, line, label, "", [Word(op), *rest]) -> instruction(isa, sources, asm, line, label, op, split_args(rest))
 work(_, _, _, line, _, "", [token, *_]) -> Err(locate(line, "expected an opcode, found `${token}`"))
 work(_, _, asm, line, label, ".set", [_, *expression]) -> located(line, (
@@ -290,7 +292,7 @@ terminated : List(Token) -> Result(List(U8), Str)
 terminated([Text(bytes)]) -> Ok(bytes.append(U8.zero))
 terminated(_) -> Err("expected a string")
 
-include : (c, Sources, Asm, Line, Pending, Str) -> Result(Asm, Str) where InstructionSet(c)
+include : (c, Sources, Asm, Line, Pending, Str) -> Result(Asm, Str) where InstructionSet(c, r, o)
 include(_, _, asm, _, NoLabel, path) if asm.included.contains(path) -> Ok(asm)
 include(isa, sources, asm, line, NoLabel, path) -> (
   lines = located(line, file_lines(sources, path))?
@@ -302,7 +304,7 @@ include(isa, sources, asm, line, Label(namespace), path) -> (
   Ok({symbols.prefix: asm.symbols.prefix, *inner})
 )
 
-data : (c, Asm, Pending, Nat, Bool, List(List(Token))) -> Result(Asm, Str) where InstructionSet(c)
+data : (c, Asm, Pending, Nat, Bool, List(List(Token))) -> Result(Asm, Str) where InstructionSet(c, r, o)
 data(isa, asm, label, size, signed, args) -> (
   asm = declare_data(asm, label)?
   values = args.try_map(|arg| data_values(asm, arg, size * 8, signed))?
@@ -337,6 +339,24 @@ in_range(value, bits, signed) -> (
   if fits then Ok({}) else Err("${signed_text(value)} does not fit in ${bits} bits")
 )
 
+# A name in small letters, for an instruction set whose names ignore case.
+lowered : Str -> Str
+lowered(name) -> Str.from_utf8(name.to_utf8().map(|byte| byte.to_ascii_lower())).ok_or(name)
+
+# The one of `values`, a type's constructors, whose name in small letters
+# is `name`: how an instruction set reads its registers and opcodes.
+named : (List(a), Str) -> Result(a, [NotFound]) where a.to_str : a -> Str
+named(values, name) -> values.find(|value| lowered(value.to_str()) == name)
+
+# Where `value` is among `values`, for a constructor's number in an
+# encoding.
+position : (List(a), a) -> Result(Nat, [NotFound]) where a.equals : (a, a) -> Bool
+position(values, value) -> values.find_index(|each| each == value)
+
+expect lowered("MoV") == "mov"
+expect named([Ok(1), Err(2)], "err(2)") == Ok(Err(2))
+expect position(["a", "b"], "b") == Ok(1)
+
 # `value` masked to a field `bits` wide, refusing one that does not fit,
 # signed or unsigned: what an instruction set's encoder puts in a field.
 field : (U64, Nat) -> Result(Nat, Str)
@@ -354,13 +374,13 @@ find_macro(asm, name) -> asm.macros.get(symbols_qualify(asm.symbols, name)) is (
   Err(_) then asm.macros.get(name)
 )
 
-instruction : (c, Sources, Asm, Line, Pending, Str, List(List(Token))) -> Result(Asm, Str) where InstructionSet(c)
+instruction : (c, Sources, Asm, Line, Pending, Str, List(List(Token))) -> Result(Asm, Str) where InstructionSet(c, r, o)
 instruction(isa, sources, asm, line, label, op, args) -> (
   asm = located(line, declare_program(asm, label))?
   if find_macro(asm, op) is Ok(template) return expand(isa, sources, asm, line, template, args)
-  if !isa.opcodes().contains(op) return Err(locate(line, "unknown opcode `${op}`"))
+  opcode = isa.opcode(op).map_err(|_| locate(line, "unknown opcode `${op}`"))?
   arguments = located(line, args.try_map(|arg| argument(isa, asm, arg)))?
-  bytes = isa.encode(U64.of_nat(asm.program.len()), op, arguments) is (
+  bytes = isa.encode(U64.of_nat(asm.program.len()), opcode, arguments) is (
     Ok(bytes) then Ok(bytes)
     # Operands may hold placeholders for labels not yet defined, so an
     # instruction is refused only in the final pass.
@@ -371,11 +391,11 @@ instruction(isa, sources, asm, line, label, op, args) -> (
   Ok({program: asm.program.concat(encoded), *asm})
 )
 
-register_of : (c, Token) -> Result(Nat, [NotRegister]) where InstructionSet(c)
+register_of : (c, Token) -> Result(r, [NotRegister]) where InstructionSet(c, r, o)
 register_of(isa, Word(name)) -> isa.register(name)
 register_of(_, _) -> Err(NotRegister)
 
-argument : (c, Asm, List(Token)) -> Result(Argument, Str) where InstructionSet(c)
+argument : (c, Asm, List(Token)) -> Result(Argument(r), Str) where InstructionSet(c, r, o)
 argument(isa, asm, [Op("["), *inner, Op("]")]) -> (
   bases = inner.filter(|token| register_of(isa, token).is_ok())
   offset = inner.map(|token| if register_of(isa, token).is_ok() then Number(U64.zero) else token)
@@ -389,7 +409,7 @@ argument(isa, asm, [token]) if register_of(isa, token) is Ok(r) -> Ok(Reg(r))
 argument(_, _, [Text(_)]) -> Err("a string is not an instruction's operand")
 argument(_, asm, tokens) -> value_of(asm, tokens).map_ok(Imm)
 
-expand : (c, Sources, Asm, Line, Macro, List(List(Token))) -> Result(Asm, Str) where InstructionSet(c)
+expand : (c, Sources, Asm, Line, Macro, List(List(Token))) -> Result(Asm, Str) where InstructionSet(c, r, o)
 expand(isa, sources, asm, line, template, args) -> (
   if args.len() != template.params.len() return Err(locate(line, "macro expects ${template.params.len()} arguments, got ${args.len()}"))
   body = located(line, template.body.try_map(|inner| substitute(inner, template.params, args)))?

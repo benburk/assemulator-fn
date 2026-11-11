@@ -11,7 +11,7 @@ import ports {Ports, Step.*, Processor, ports_new, port_take_output, port_give_l
 export {assemulator!, load!, hex}
 
 assemulator! : (Host, c) -> [] where
-  InstructionSet(c),
+  InstructionSet(c, r, o),
   c.boot : (c, U64, List(U8), List(U8)) -> p,
   Processor(p)
 assemulator!(host, isa) -> (
@@ -20,7 +20,7 @@ assemulator!(host, isa) -> (
 )
 
 command! : (Host, c, List(Str)) -> U8 where
-  InstructionSet(c),
+  InstructionSet(c, r, o),
   c.boot : (c, U64, List(U8), List(U8)) -> p,
   Processor(p)
 command!(host, isa, ["assemble", path]) -> (
@@ -43,7 +43,7 @@ fail!(host, message) -> (
   1
 )
 
-build! : (Files, c, Str) -> Result(Assembly, Str) where InstructionSet(c)
+build! : (Files, c, Str) -> Result(Assembly, Str) where InstructionSet(c, r, o)
 build!(files, isa, path) -> (
   sources = load!(files, path)?
   assemble(isa, sources, path)
@@ -106,7 +106,7 @@ show!(host, Ok(assembly)) -> (
 )
 
 run! : (Host, c, Result(Assembly, Str), Bool) -> U8 where
-  InstructionSet(c),
+  InstructionSet(c, r, o),
   c.boot : (c, U64, List(U8), List(U8)) -> p,
   Processor(p)
 run!(host, _, Err(message), _) -> fail!(host, message)

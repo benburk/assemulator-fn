@@ -6,8 +6,10 @@
 
 package {}
 
-import assembler {Argument.*, Assembly, Sources, InstructionSet, assemble, field, lowered, named, position}
-import ports {Ports, PortRead, Step.*, Processor, ports_new, port_read, port_write}
+import instruction_set {Argument.*, InstructionSet, field, lowered, named, position}
+import processor {Step.*, Processor}
+import assembler {Assembly, Sources, assemble}
+import ports {Ports, PortRead, ports_new, port_read, port_write}
 import run {assemulator!, load!, hex}
 
 export {Argument.*, Assembly, Sources, InstructionSet, assemble, field, lowered, named, position, Ports, PortRead, Step.*, Processor, ports_new, port_read, port_write, assemulator!, load!, hex}

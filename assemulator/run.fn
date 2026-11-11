@@ -5,8 +5,10 @@
 #                            and waiting for enter with `--debug`
 
 import std.host {Host, Files, Stdin, Stdout, Mode.*, Chunk}
-import assembler {Assembly, Sources, InstructionSet, assemble, includes_of}
-import ports {Ports, Step.*, Processor, ports_new, port_take_output, port_give_line}
+import assembler {Assembly, Sources, assemble, includes_of}
+import instruction_set {InstructionSet}
+import ports {Ports, ports_new, port_take_output, port_give_line}
+import processor {Step.*, Processor}
 
 export {assemulator!, load!, hex}
 

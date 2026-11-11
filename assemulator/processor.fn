@@ -1,0 +1,14 @@
+# What a processor offers the runner, which steps it.
+
+import ports {Ports}
+
+export {Step.*, Processor}
+
+# What one step of a processor did.
+Step : [Continue, Halt, Blocked, Fault(Str)]
+
+# What a processor offers the runner: a step, given the ports, and a
+# description of its state for `--debug`.
+Processor(p) = where
+  p.step : (p, Ports) -> (p, Ports, Step),
+  p.show : p -> Str

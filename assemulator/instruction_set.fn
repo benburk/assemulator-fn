@@ -1,0 +1,68 @@
+# What an instruction set tells the assembler, and what its encoder is
+# handed and may use. A CPU declares its registers `r` and opcodes `o` as
+# types, reads their names with `named`, and encodes with `field`.
+
+export {Argument.*, InstructionSet, field, lowered, named, position, signed_text}
+
+# An instruction's operand, as the instruction set's `encode` is handed it,
+# `r` being the instruction set's registers.
+Argument(r) : [
+  Reg(r),
+  Imm(U64),
+  # `[offset]`, a memory operand without a register.
+  Mem(U64),
+  # `[register + offset]`.
+  MemReg(r, U64),
+].(
+  to_str : Argument(r) -> Str where r.to_str : r -> Str
+  to_str(Reg(r)) -> r.to_str()
+  to_str(Imm(x)) -> "${x}"
+  to_str(Mem(x)) -> "[${x}]"
+  to_str(MemReg(r, x)) -> "[${r} + ${x}]"
+
+  equals : (Argument(r), Argument(r)) -> Bool where r.equals : (r, r) -> Bool
+)
+
+# What an instruction set tells the assembler: which register `r` and which
+# opcode `o` a name is, how one instruction is encoded at an address, and
+# its byte order.
+# An instruction's length must not depend on its operands' values, since a
+# label defined later is 0 in the first pass.
+InstructionSet(c, r, o) = where
+  c.register : (c, Str) -> Result(r, [NotRegister]),
+  c.opcode : (c, Str) -> Result(o, [NotOpcode]),
+  c.encode : (c, U64, o, List(Argument(r))) -> Result(List(U8), Str),
+  c.big_endian : c -> Bool
+
+# A two's complement word as a signed number, for messages.
+signed_text : U64 -> Str
+signed_text(value) -> if value.to_nat() >= 2.pow(63) then "-${(U64.zero - value).to_nat()}" else "${value.to_nat()}"
+
+# A name in small letters, for an instruction set whose names ignore case.
+lowered : Str -> Str
+lowered(name) -> Str.from_utf8(name.to_utf8().map(|byte| byte.to_ascii_lower())).ok_or(name)
+
+# The one of `values`, a type's constructors, whose name in small letters
+# is `name`: how an instruction set reads its registers and opcodes.
+named : (List(a), Str) -> Result(a, [NotFound]) where a.to_str : a -> Str
+named(values, name) -> values.find(|value| lowered(value.to_str()) == name)
+
+# Where `value` is among `values`, for a constructor's number in an
+# encoding.
+position : (List(a), a) -> Result(Nat, [NotFound]) where a.equals : (a, a) -> Bool
+position(values, value) -> values.find_index(|each| each == value)
+
+expect lowered("MoV") == "mov"
+expect named([Ok(1), Err(2)], "err(2)") == Ok(Err(2))
+expect position(["a", "b"], "b") == Ok(1)
+
+# `value` masked to a field `bits` wide, refusing one that does not fit,
+# signed or unsigned: what an instruction set's encoder puts in a field.
+field : (U64, Nat) -> Result(Nat, Str)
+field(value, bits) -> (
+  v = value.to_nat()
+  mask = 2.pow(bits) - 1
+  negative = v >= 2.pow(63)
+  too_big = if negative then 2.pow(64) - v > mask else v > mask
+  if too_big then Err("value ${signed_text(value)} does not fit in ${bits} bits") else Ok(v.and(mask))
+)

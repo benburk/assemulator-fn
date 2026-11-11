@@ -133,15 +133,17 @@ line. See [cpus/risc16/main.fn](cpus/risc16/main.fn), about 180 lines.
 
 ## Layout
 
-| Path                        | What it holds                                |
-| --------------------------- | -------------------------------------------- |
-| `assemulator/lexer.fn`      | tokens, numbers, strings                     |
-| `assemulator/expression.fn` | expression evaluation on 64-bit words        |
-| `assemulator/symbols.fn`    | labels, local scopes, include namespaces     |
-| `assemulator/assembler.fn`  | the two passes, directives, macros           |
-| `assemulator/ports.fn`      | the character and number ports               |
-| `assemulator/run.fn`        | the command line, file loading, the stepping |
-| `cpus/*/main.fn`            | one CPU each                                 |
+| Path                             | What it holds                          |
+| -------------------------------- | -------------------------------------- |
+| `assemulator/instruction_set.fn` | encoding: `InstructionSet`, `Argument` |
+| `assemulator/processor.fn`       | stepping: `Processor`, `Step`          |
+| `assemulator/lexer.fn`           | tokens, numbers, strings               |
+| `assemulator/expression.fn`      | expressions on 64-bit words            |
+| `assemulator/symbols.fn`         | labels, local scopes, namespaces       |
+| `assemulator/assembler.fn`       | the two passes, directives, macros     |
+| `assemulator/ports.fn`           | the character and number ports         |
+| `assemulator/run.fn`             | command line, file loading, stepping   |
+| `cpus/*/main.fn`                 | one CPU each                           |
 
 ## How it differs from the Rust version
 

@@ -9,20 +9,11 @@
 
 import lexer {parse_int}
 
-export {Ports, PortRead, Step.*, Processor, ports_new, port_read, port_write, port_take_output, port_give_line}
+export {Ports, PortRead, ports_new, port_read, port_write, port_take_output, port_give_line}
 
 Ports = {chars: List(U8), lines: List(List(U8)), output: List(U8)}
 
 PortRead = [Got(Nat), Wait]
-
-# What one step of a processor did.
-Step : [Continue, Halt, Blocked, Fault(Str)]
-
-# What a processor offers the runner: a step, given the ports, and a
-# description of its state for `--debug`.
-Processor(p) = where
-  p.step : (p, Ports) -> (p, Ports, Step),
-  p.show : p -> Str
 
 ports_new : Ports
 ports_new = {chars: [], lines: [], output: []}

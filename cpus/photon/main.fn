@@ -157,16 +157,17 @@ store(cpu, address, value) -> (
 
 execute : (State, Ports, Nat) -> (State, Ports, Step)
 execute(cpu, ports, inst) -> (
-  ra = inst / 8192 % 8
-  rb = inst / 32 % 8
-  group = inst / 256 % 32
+  ra = inst.shift_right(13) & 7
+  rb = inst.shift_right(5) & 7
+  group = inst.shift_right(8) & 31
+  with_immediate = (inst.shift_right(11) & 3) == 1
   # five bits sign-extended for the offset forms, else the low byte
-  low = inst % 32
-  imm = if inst.and(7168) == 7168 then (if low >= 16 then low + 224 else low) else inst % 256
-  result = if group == 0 then alu(cpu, inst % 32, ra, rb)
-    else if inst / 2048 % 4 == 1 then Ok(immediate(cpu, group % 8, ra, imm))
+  low = inst & 31
+  imm = if (inst & 7168) == 7168 then (if low >= 16 then low + 224 else low) else inst & 255
+  result = if group == 0 then alu(cpu, low, ra, rb)
+    else if with_immediate then Ok(immediate(cpu, group & 7, ra, imm))
     else Ok(cpu)
-  if group == 0 | inst / 2048 % 4 == 1 return result is (
+  if group == 0 | with_immediate return result is (
     Ok(after) then (after, ports, Continue)
     Err(message) then (cpu, ports, Fault(message))
   )
@@ -191,13 +192,13 @@ alu(cpu, op, ra, rb) -> (
     8..11 then (
       sum = a + b + carry
       written = set(cpu, ra, sum)
-      Ok(if op / 2 % 2 == 1 then flag(written, sum > 255) else written)
+      Ok(if (op & 2) == 2 then flag(written, sum > 255) else written)
     )
     # sub: bit 0 subtracts the borrow in, bit 1 writes the borrow out
     12..15 then (
       subtrahend = b + carry
       written = set(cpu, ra, a + 512 - subtrahend)
-      Ok(if op / 2 % 2 == 1 then flag(written, a < subtrahend) else written)
+      Ok(if (op & 2) == 2 then flag(written, a < subtrahend) else written)
     )
     16 then Ok(set(cpu, ra, b * 2))
     17 then Ok(set(cpu, ra, b * 2 + bit(cpu.x)))

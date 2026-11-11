@@ -120,13 +120,13 @@ Decoded = {op: Nat, a: Nat, b: Nat, c: Nat, imm: U16, upper: U16}
 
 decode : Nat -> Decoded
 decode(inst) -> {
-  op: inst / 8192,
-  a: inst / 1024 % 8,
-  b: inst / 128 % 8,
-  c: inst % 8,
+  op: inst.shift_right(13),
+  a: inst.shift_right(10) & 7,
+  b: inst.shift_right(7) & 7,
+  c: inst & 7,
   # the low seven bits, sign-extended
-  imm: U16.of_nat(inst % 128).xor(U16.of_nat(64)) - U16.of_nat(64),
-  upper: U16.of_nat(inst * 64),
+  imm: U16.of_nat(inst & 127).xor(U16.of_nat(64)) - U16.of_nat(64),
+  upper: U16.of_nat(inst.shift_left(6)),
 }
 
 reg : (Cpu, Nat) -> U16

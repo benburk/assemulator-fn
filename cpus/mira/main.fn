@@ -122,7 +122,7 @@ Cpu : State.(
     k = fetched(cpu, 1)
     # Reading a port is what may stall or fail, and an instruction reads
     # its operand before it writes anything, so that comes first.
-    read = if reads(inst) then load(cpu, ports, inst % 8, k) else Ok((Got(0), ports))
+    read = if reads(inst) then load(cpu, ports, inst & 7, k) else Ok((Got(0), ports))
     read is (
       Ok((Got(b), ports)) then (
         k2 = fetched(cpu, 2)
@@ -157,9 +157,9 @@ memory(mode) -> mode >= 5
 # and an immediate.
 length : Nat -> Nat
 length(inst) -> (
-  first = inst / 8 % 8
-  second = inst % 8
-  inst / 64 is (
+  first = inst.shift_right(3) & 7
+  second = inst & 7
+  inst.shift_right(6) is (
     0 then 1 + bit(memory(second))
     1 then 2 + bit(memory(second))
     2 then 1 + bit(memory(first)) + bit(memory(second)) + bit(first == second)
@@ -171,9 +171,9 @@ length(inst) -> (
 # the jumps do.
 reads : Nat -> Bool
 reads(inst) -> (
-  first = inst / 8 % 8
-  group = inst / 64
-  !(group == 2 & first == inst % 8) & !(group == 3 & first >= 6)
+  first = inst.shift_right(3) & 7
+  group = inst.shift_right(6)
+  !(group == 2 & first == (inst & 7)) & !(group == 3 & first >= 6)
 )
 
 reg : (State, Nat) -> Nat
@@ -206,9 +206,9 @@ stored(cpu, ports, mode, k, value) -> (
 
 execute : (State, Ports, Nat, Nat, Nat, Nat) -> (Cpu, Ports, Step)
 execute(cpu, ports, inst, b, k, k2) -> (
-  first = inst / 8 % 8
-  second = inst % 8
-  inst / 64 is (
+  first = inst.shift_right(3) & 7
+  second = inst & 7
+  inst.shift_right(6) is (
     # group 0 naming `a` as its operand is a nop
     0 if second == 0 then (Cpu(cpu), ports, Continue)
     0 then arithmetic(cpu, ports, first, reg(cpu, 0), b, 0, k)
@@ -228,7 +228,7 @@ execute(cpu, ports, inst, b, k, k2) -> (
 arithmetic : (State, Ports, Nat, Nat, Nat, Nat, Nat) -> (Cpu, Ports, Step)
 arithmetic(cpu, ports, op, a, b, mode, k) -> (
   result = alu(op, a, b, bit(cpu.carry))
-  flagged = if op <= 4 then {carry: result < a, overflow: a.xor(result) / 128 != a.xor(b) / 128, *signed(cpu, result)} else signed(cpu, result)
+  flagged = if op <= 4 then {carry: result < a, overflow: (a ^ result).shift_right(7) != (a ^ b).shift_right(7), *signed(cpu, result)} else signed(cpu, result)
   if op == 4 then (Cpu(flagged), ports, Continue) else stored(flagged, ports, mode, k, result)
 )
 

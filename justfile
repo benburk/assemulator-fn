@@ -43,7 +43,7 @@ examples: build
     set -euo pipefail
     root=$(pwd)
     status=0
-    for program in $(fd -e asm -E wip -E ports.asm -E macros.asm . cpus | sort); do
+    for program in $(fd -e asm -E wip -E ports.asm -E macros.asm -E greeting.asm . cpus | sort); do
         cpu=$(echo "$program" | cut -d/ -f2)
         expected="${program%.asm}.out"
         input="$root/${program%.asm}.in"

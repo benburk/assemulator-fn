@@ -7,18 +7,18 @@
         ]
       },
       "locked": {
-        "lastModified": 1794421824,
-        "narHash": "sha256-lKf+HFUdbkQlcv9Ry2uSgCUXgeeZT7d3GIWyM6WT4zw=",
+        "lastModified": 1794433608,
+        "narHash": "sha256-Oxk9Ahf1ZBieWKHgOdeVhircg7T7hm0n1PYCqbx453I=",
         "ref": "main",
-        "rev": "086d9c20ca836e911b3405dba527c45a2903fcfd",
-        "revCount": 553,
+        "rev": "4319059b36d197f0e341ae0a5fbc8284a77782f5",
+        "revCount": 554,
         "type": "git",
-        "url": "file:///vault/repos/faun-lang"
+        "url": "https://github.com/benburk/faun-lang"
       },
       "original": {
         "ref": "main",
         "type": "git",
-        "url": "file:///vault/repos/faun-lang"
+        "url": "https://github.com/benburk/faun-lang"
       }
     },
     "nixpkgs": {

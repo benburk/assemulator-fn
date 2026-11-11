@@ -16,7 +16,7 @@
 # The program starts at the label `main`, or at 0 without one.
 
 import lexer {Token.*, tokenize}
-import symbols {Symbol.*, Symbols, symbols_new, symbols_pass, symbols_lookup, symbols_declare, symbols_qualify, symbols_enter, symbols_leave}
+import symbols {Symbol.*, Symbols, symbols_new, symbols_pass, symbols_lookup, symbols_declare, symbols_qualify}
 import expression {evaluate}
 
 export {Argument.*, Assembly, Sources, InstructionSet, assemble, field, resolve_path, includes_of}
@@ -178,7 +178,7 @@ handle(_, _, cursor, line, ".macro", [_, *params]) -> (
   end = located(line, cursor.lines.find_index(|next| line_directive(next) == ".endm").map_err(|_| "missing .endm"))?
   key = symbols_qualify(cursor.asm.symbols, name)
   macros = cursor.asm.macros.insert(key, {params: names, body: cursor.lines.take(end)})
-  Ok({asm: {macros, *cursor.asm}, lines: cursor.lines.drop(end + 1), pending: NoLabel, *cursor})
+  Ok({asm.macros: macros, lines: cursor.lines.drop(end + 1), pending: NoLabel, *cursor})
 )
 handle(_, _, cursor, line, ".if", [_, *condition]) -> (
   value = located(line, value_of(cursor.asm, condition))?
@@ -298,9 +298,8 @@ include(isa, sources, asm, line, NoLabel, path) -> (
 )
 include(isa, sources, asm, line, Label(namespace), path) -> (
   lines = located(line, file_lines(sources, path))?
-  (symbols, outer) = symbols_enter(asm.symbols, namespace)
-  inner = assemble_lines(isa, sources, {symbols, *asm}, lines)?
-  Ok({symbols: symbols_leave(inner.symbols, outer), *inner})
+  inner = assemble_lines(isa, sources, {symbols.prefix: symbols_qualify(asm.symbols, namespace), *asm}, lines)?
+  Ok({symbols.prefix: asm.symbols.prefix, *inner})
 )
 
 data : (c, Asm, Pending, Nat, Bool, List(List(Token))) -> Result(Asm, Str) where InstructionSet(c)

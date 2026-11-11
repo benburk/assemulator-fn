@@ -1,9 +1,7 @@
 {
   inputs.nixpkgs.url = "github:nixos/nixpkgs/nixos-26.05";
-  # The Faun compiler, from the local checkout's main, which is ahead of
-  # GitHub; once it is pushed, point this at "github:benburk/faun-lang" and
-  # run `nix flake update faun`.
-  inputs.faun.url = "git+file:///vault/repos/faun-lang?ref=main";
+  # The Faun compiler, from faun-lang's main.
+  inputs.faun.url = "git+https://github.com/benburk/faun-lang?ref=main";
   inputs.faun.inputs.nixpkgs.follows = "nixpkgs";
 
   outputs =

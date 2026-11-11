@@ -13,7 +13,7 @@
 
 import lexer {is_local}
 
-export {Symbol.*, Symbols, symbols_new, symbols_pass, symbols_lookup, symbols_declare, symbols_qualify, symbols_enter, symbols_leave}
+export {Symbol.*, Symbols, symbols_new, symbols_pass, symbols_lookup, symbols_declare, symbols_qualify}
 
 Symbol : [Address(U64), Data(U64), Value(U64)].(
   value : Symbol -> U64
@@ -45,13 +45,6 @@ symbols_pass(symbols) -> {table: Map.empty, known: symbols.table, prefix: "", ru
 
 symbols_qualify : (Symbols, Str) -> Str
 symbols_qualify(symbols, name) -> if symbols.prefix.is_empty() then name else "${symbols.prefix}::${name}"
-
-# Enter a file included under `namespace`, answering the prefix to restore.
-symbols_enter : (Symbols, Str) -> (Symbols, Str)
-symbols_enter(symbols, namespace) -> ({prefix: symbols_qualify(symbols, namespace), *symbols}, symbols.prefix)
-
-symbols_leave : (Symbols, Str) -> Symbols
-symbols_leave(symbols, prefix) -> {prefix, *symbols}
 
 local_key : (Str, Nat) -> Str
 local_key(name, run) -> "${name}#${run}"

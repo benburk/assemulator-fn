@@ -123,8 +123,8 @@ line. See [cpus/risc16/main.fn](cpus/risc16/main.fn), about 170 lines.
 
 ## Faun
 
-The flake builds Faun from the `assemulator-fixes` branch of faun-lang, which
-carries these changes from writing this:
+The flake builds Faun from the local faun-lang checkout's `main`, which carries
+these changes from writing this:
 
 - Programs of more than a few hundred functions failed to build with
   `` `exit!` requires Word, but its argument needs Natural ``: the walk that
@@ -140,5 +140,5 @@ carries these changes from writing this:
   recursion, folds and clauses, which came out 11% shorter and runs the same
   instructions; that comparison is in faun-lang's `notes/iteration.md`.
 
-Once the branch is on faun-lang's `main`, point the flake's `faun` input at
+Once faun-lang's `main` is pushed, point the flake's `faun` input at
 `github:benburk/faun-lang`.

@@ -79,7 +79,7 @@ main:   mov b, 3
         pst a, @ticker
 ```
 
-Run the program with `just run photon cpus/photon/programs/math/multiplication.asm` and `45` should be printed to stdout. Check out the programs folder for more examples.
+Run the program with `./build/photon run cpus/photon/programs/math/multiplication.asm` and `45` should be printed to stdout. Check out the programs folder for more examples.
 
 ## Rationale
 

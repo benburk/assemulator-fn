@@ -16,24 +16,30 @@ unchanged, with the same output and the same assembled bytes:
   instructions of one to three bytes, memory operands, and ports at memory
   addresses
 
+Each CPU builds to one program, which assembles a file and runs it. Build one
+with the `faun` the flake's dev shell provides,
+`faun build -o build/<cpu> cpus/<cpu>/main.fn`:
+
 ```console
-$ just run photon cpus/photon/programs/hello_world.asm
+$ faun build -o build/photon cpus/photon/main.fn
+wrote build/photon
+$ ./build/photon run cpus/photon/programs/hello_world.asm
 Hello, World!
-$ just run mira cpus/mira/programs/collatz.asm
+$ ./build/mira run cpus/mira/programs/collatz.asm
 19
 58
 ...
-$ just run risc16 cpus/risc16/programs/sieve.asm
+$ ./build/risc16 run cpus/risc16/programs/sieve.asm
 2
 3
 5
 ...
-$ just run photon cpus/photon/programs/games/guessing_game.asm
-$ just assemble risc16 cpus/risc16/programs/multiplication.asm
-$ just run risc16 cpus/risc16/programs/countdown.asm --debug
+$ ./build/photon run cpus/photon/programs/games/guessing_game.asm
+$ ./build/risc16 assemble cpus/risc16/programs/multiplication.asm
+$ ./build/risc16 run cpus/risc16/programs/countdown.asm --debug
 ```
 
-`just demo` gives a short tour, `just` lists the recipes, and `just test` runs the library's `expect`s and then
+`just build` builds every CPU into `build/`, `just demo` gives a short tour, `just` lists the recipes, and `just test` runs the library's `expect`s and then
 every example program, checking each against its `.out` file.
 
 ## Assembler features

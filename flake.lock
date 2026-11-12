@@ -7,11 +7,11 @@
         ]
       },
       "locked": {
-        "lastModified": 1794444277,
-        "narHash": "sha256-jsgNDnTvBKNFma/NqaGjKqRkIHMz8ToHJUUFLDF4awY=",
+        "lastModified": 1794445272,
+        "narHash": "sha256-EnvzVtB3PzO+mqagtZ51O0ngi/HJ/57/s28UT6jChcc=",
         "owner": "benburk",
         "repo": "faun-lang",
-        "rev": "3568792ac07b9a4ee4ee148dec66fdeb39aaef40",
+        "rev": "d44103c6bd880eba985dea0a0aec6416b5fd0931",
         "type": "github"
       },
       "original": {

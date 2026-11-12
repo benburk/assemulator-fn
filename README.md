@@ -153,9 +153,10 @@ line. See [cpus/risc16/main.fn](cpus/risc16/main.fn), about 180 lines.
   emulator runs from the repo root (as the `just` recipes do), and includes
   like `../ports.asm` are resolved against the including file's path.
 - A local label is looked up in its own scope, then in the scope before it.
-- About 50 million emulated instructions a second, against the Rust version's
-  300 million. `step` hands back the processor without keeping the old one, so
-  each register write is made in place rather than copied.
+- About 70 million emulated instructions a second on Photon and 85 million on
+  RiSC-16, against the Rust version's 300 million. `step` hands back the
+  processor without keeping the old one, so each register write is made in
+  place rather than copied, and a step's `Continue` is allocated nowhere.
 - No bitmap screen or real-time buttons yet, as in the Rust version's plans.
 
 ## Faun

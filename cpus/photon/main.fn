@@ -160,18 +160,17 @@ execute(cpu, ports, inst) -> (
   ra = inst.shift_right(13) & 7
   rb = inst.shift_right(5) & 7
   group = inst.shift_right(8) & 31
-  with_immediate = (inst.shift_right(11) & 3) == 1
   # five bits sign-extended for the offset forms, else the low byte
   low = inst & 31
   imm = if (inst & 7168) == 7168 then (if low >= 16 then low + 224 else low) else inst & 255
-  result = if group == 0 then alu(cpu, low, ra, rb)
-    else if with_immediate then Ok(immediate(cpu, group & 7, ra, imm))
-    else Ok(cpu)
-  if group == 0 | with_immediate return result is (
+  # Group 0 works on two registers and groups 8 to 15 on a register and an
+  # immediate; the rest branch, load, store and use the ports.
+  if group != 0 & group.shift_right(3) != 1 return control(cpu, ports, inst, group, ra, rb, imm)
+  result = if group == 0 then alu(cpu, low, ra, rb) else Ok(immediate(cpu, group & 7, ra, imm))
+  result is (
     Ok(after) then (after, ports, Continue)
     Err(message) then (cpu, ports, Fault(message))
   )
-  control(cpu, ports, inst, group, ra, rb, imm)
 )
 
 alu : (State, Nat, Nat, Nat) -> Result(State, Str)
